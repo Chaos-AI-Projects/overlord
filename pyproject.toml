@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "overlord"
+version = "0.1.0"
+description = "Repeatable tasks manager for AI agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+include = ["overlord*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
