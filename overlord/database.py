@@ -2,7 +2,6 @@
 
 import os
 import sqlite3
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -19,7 +18,14 @@ DEFAULT_DB_PATH = Path(
     os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
 ) / "overlord" / "overlord.db"
 
+SCHEMA_VERSION = 1
+
 SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -79,6 +85,9 @@ class Database:
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
+            # check_same_thread=False: needed for multi-thread access (e.g. FastAPI).
+            # Phase 2's scheduler with concurrent jobs will need proper thread
+            # synchronization (connection pool or per-thread connections).
             self._conn = sqlite3.connect(
                 str(self.db_path), check_same_thread=False
             )
@@ -88,8 +97,14 @@ class Database:
         return self._conn
 
     def init_schema(self) -> None:
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist and record schema version."""
         self.conn.executescript(SCHEMA_SQL)
+        row = self.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        if row[0] is None:
+            self.conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+            )
+            self.conn.commit()
 
     def close(self) -> None:
         if self._conn is not None:
@@ -150,12 +165,12 @@ class Database:
             (job_id, ExecutionStatus.RUNNING.value),
         )
         self.conn.commit()
-        return ExecutionRecord(
-            id=cur.lastrowid,
-            job_id=job_id,
-            status=ExecutionStatus.RUNNING,
-            started_at=datetime.now(),
-        )
+        # Re-read the row to get the DB-generated UTC started_at, avoiding
+        # local-time vs UTC divergence from using datetime.now().
+        row = self.conn.execute(
+            "SELECT * FROM execution_history WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+        return self._row_to_execution(row)
 
     def finish_execution(
         self, execution_id: int, status: ExecutionStatus,
@@ -187,7 +202,7 @@ class Database:
         self.conn.commit()
         return Message(id=cur.lastrowid, source_job_id=source_job_id, payload=payload)
 
-    def poll_messages(self, limit: int = 10) -> list[Message]:
+    def poll_messages(self, limit: int = 10) -> list[Message]:  # Phase 3: poll-based consumption
         rows = self.conn.execute(
             "SELECT * FROM messages WHERE consumed = 0 "
             "ORDER BY created_at ASC LIMIT ?",
@@ -195,7 +210,7 @@ class Database:
         ).fetchall()
         return [self._row_to_message(r) for r in rows]
 
-    def mark_consumed(self, message_id: int) -> None:
+    def mark_consumed(self, message_id: int) -> None:  # Phase 3: poll-based consumption
         self.conn.execute(
             "UPDATE messages SET consumed = 1, consumed_at = CURRENT_TIMESTAMP "
             "WHERE id = ?",

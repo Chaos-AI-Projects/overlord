@@ -9,14 +9,14 @@ from typing import Optional
 class JobStatus(str, Enum):
     ENABLED = "enabled"
     DISABLED = "disabled"
-    PAUSED = "paused"
+    PAUSED = "paused"  # Phase 2: used when scheduler suspends a job temporarily
 
 
 class ExecutionStatus(str, Enum):
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
-    TIMEOUT = "timeout"
+    TIMEOUT = "timeout"  # Phase 2: set by scheduler when execution exceeds time limit
 
 
 @dataclass
@@ -49,7 +49,11 @@ class ExecutionRecord:
 
 @dataclass
 class Message:
-    """A message produced by a job, consumed via polling."""
+    """A message produced by a job, consumed via polling.
+
+    Note: consumed/consumed_at fields are Phase 3 additions (poll-based
+    consumption). Included here so the schema is stable from Phase 1 onward.
+    """
 
     source_job_id: int
     payload: str
