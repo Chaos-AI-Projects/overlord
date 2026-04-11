@@ -13,6 +13,7 @@ dependencies = []
 [project.optional-dependencies]
 test = [
     "pytest",
+    "pytest-asyncio",
 ]
 
 [tool.setuptools.packages.find]
@@ -20,3 +21,4 @@ include = ["overlord*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"

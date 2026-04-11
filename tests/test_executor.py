@@ -1,0 +1,106 @@
+"""Tests for the async job executor."""
+
+import asyncio
+
+import pytest
+
+from overlord.database import Database
+from overlord.executor import run_job
+from overlord.models import ExecutionStatus, Job, JobStatus
+
+
+@pytest.fixture
+def db(tmp_path):
+    d = Database(db_path=tmp_path / "test.db")
+    d.init_schema()
+    yield d
+    d.close()
+
+
+def make_job(db, **kwargs) -> Job:
+    defaults = dict(
+        name="test-job",
+        cron_expression="* * * * *",
+        command="echo hello",
+    )
+    defaults.update(kwargs)
+    return db.create_job(Job(**defaults))
+
+
+class TestExecutor:
+    @pytest.mark.asyncio
+    async def test_successful_command(self, db):
+        job = make_job(db, command="echo hello world")
+        record = await run_job(job, db)
+        assert record.status == ExecutionStatus.SUCCESS
+        assert record.exit_code == 0
+        assert "hello world" in record.stdout
+
+    @pytest.mark.asyncio
+    async def test_failed_command(self, db):
+        job = make_job(db, command="exit 42")
+        record = await run_job(job, db)
+        assert record.status == ExecutionStatus.FAILED
+        assert record.exit_code == 42
+
+    @pytest.mark.asyncio
+    async def test_stderr_capture(self, db):
+        job = make_job(db, command="echo err >&2")
+        record = await run_job(job, db)
+        assert record.status == ExecutionStatus.SUCCESS
+        assert "err" in record.stderr
+
+    @pytest.mark.asyncio
+    async def test_timeout(self, db):
+        job = make_job(db, command="sleep 60", timeout_seconds=1)
+        record = await run_job(job, db)
+        assert record.status == ExecutionStatus.TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_exclusive_lock(self, db):
+        job = make_job(db, command="echo locked", exclusive_lock="deploy")
+        record = await run_job(job, db)
+        assert record.status == ExecutionStatus.SUCCESS
+        # Lock should be released after execution.
+        assert db.get_lock("deploy") is None
+
+    @pytest.mark.asyncio
+    async def test_lock_contention(self, db):
+        job = make_job(db, command="echo hello", exclusive_lock="deploy")
+        # Hold the lock with a fake execution.
+        blocker = db.create_execution(job.id)
+        db.acquire_lock("deploy", blocker.id)
+
+        record = await run_job(job, db)
+        assert record.status == ExecutionStatus.FAILED
+        assert "lock" in record.stderr.lower()
+
+        # Clean up.
+        db.release_lock("deploy")
+
+    @pytest.mark.asyncio
+    async def test_retry_on_failure(self, db):
+        # Command fails on every attempt — should see max_retries+1 executions.
+        job = make_job(
+            db, command="exit 1",
+            max_retries=2, retry_delay_seconds=0,
+        )
+        record = await run_job(job, db)
+        assert record.status == ExecutionStatus.FAILED
+
+        history = db.get_execution_history(job.id, limit=10)
+        assert len(history) == 3  # 1 initial + 2 retries
+
+    @pytest.mark.asyncio
+    async def test_cancel_event_stops_retries(self, db):
+        cancel = asyncio.Event()
+        cancel.set()  # already cancelled
+
+        job = make_job(
+            db, command="exit 1",
+            max_retries=5, retry_delay_seconds=0,
+        )
+        record = await run_job(job, db, cancel_event=cancel)
+        # Should have stopped early — far fewer than 6 executions.
+        history = db.get_execution_history(job.id, limit=10)
+        assert len(history) <= 1

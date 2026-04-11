@@ -28,6 +28,9 @@ class Job:
     command: str
     status: JobStatus = JobStatus.ENABLED
     exclusive_lock: Optional[str] = None
+    timeout_seconds: Optional[int] = None
+    max_retries: int = 0
+    retry_delay_seconds: int = 0
     id: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

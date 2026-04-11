@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -18,7 +19,7 @@ DEFAULT_DB_PATH = Path(
     os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
 ) / "overlord" / "overlord.db"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -33,6 +34,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     command TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'enabled',
     exclusive_lock TEXT,
+    timeout_seconds INTEGER,
+    max_retries INTEGER NOT NULL DEFAULT 0,
+    retry_delay_seconds INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -73,51 +77,114 @@ CREATE INDEX IF NOT EXISTS idx_messages_consumed ON messages(consumed);
 CREATE INDEX IF NOT EXISTS idx_messages_source_job_id ON messages(source_job_id);
 """
 
+# Migrations from one schema version to the next.
+MIGRATIONS = {
+    2: [
+        "ALTER TABLE jobs ADD COLUMN timeout_seconds INTEGER",
+        "ALTER TABLE jobs ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE jobs ADD COLUMN retry_delay_seconds INTEGER NOT NULL DEFAULT 0",
+    ],
+}
+
+
+class SchemaVersionError(Exception):
+    """Raised when the database schema version doesn't match the expected version."""
+
 
 class Database:
-    """SQLite database for Overlord job management."""
+    """SQLite database for Overlord job management.
+
+    Supports thread-local connections for safe concurrent access from the
+    scheduler's executor threads.
+    """
 
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or DEFAULT_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn: Optional[sqlite3.Connection] = None
+        self._local = threading.local()
+
+    def _make_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        return conn
 
     @property
     def conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            # check_same_thread=False: needed for multi-thread access (e.g. FastAPI).
-            # Phase 2's scheduler with concurrent jobs will need proper thread
-            # synchronization (connection pool or per-thread connections).
-            self._conn = sqlite3.connect(
-                str(self.db_path), check_same_thread=False
-            )
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA foreign_keys=ON")
-            self._conn.row_factory = sqlite3.Row
-        return self._conn
+        """Return a thread-local database connection."""
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = self._make_connection()
+            self._local.conn = c
+        return c
 
     def init_schema(self) -> None:
-        """Create tables if they don't exist and record schema version."""
+        """Create tables if they don't exist and record schema version.
+
+        If the DB already has a schema version, run any pending migrations
+        to bring it up to SCHEMA_VERSION.
+        """
         self.conn.executescript(SCHEMA_SQL)
         row = self.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
-        if row[0] is None:
+        current = row[0]
+        if current is None:
             self.conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
             )
             self.conn.commit()
+        elif current < SCHEMA_VERSION:
+            self._migrate(current)
+
+    def _migrate(self, from_version: int) -> None:
+        """Apply sequential migrations from from_version+1 to SCHEMA_VERSION."""
+        for version in range(from_version + 1, SCHEMA_VERSION + 1):
+            stmts = MIGRATIONS.get(version)
+            if stmts is None:
+                raise SchemaVersionError(
+                    f"No migration defined for version {version}"
+                )
+            for stmt in stmts:
+                self.conn.execute(stmt)
+            self.conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?)", (version,)
+            )
+        self.conn.commit()
+
+    def check_schema_version(self) -> None:
+        """Validate that the DB schema version matches SCHEMA_VERSION.
+
+        Raises SchemaVersionError if the version is wrong or missing.
+        Should be called at scheduler startup.
+        """
+        try:
+            row = self.conn.execute(
+                "SELECT MAX(version) FROM schema_version"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            raise SchemaVersionError("schema_version table does not exist")
+        current = row[0] if row else None
+        if current != SCHEMA_VERSION:
+            raise SchemaVersionError(
+                f"Schema version mismatch: DB has v{current}, expected v{SCHEMA_VERSION}"
+            )
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        c = getattr(self._local, "conn", None)
+        if c is not None:
+            c.close()
+            self._local.conn = None
 
     # -- Job CRUD --
 
     def create_job(self, job: Job) -> Job:
         cur = self.conn.execute(
-            "INSERT INTO jobs (name, cron_expression, command, status, exclusive_lock) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (job.name, job.cron_expression, job.command, job.status.value, job.exclusive_lock),
+            "INSERT INTO jobs (name, cron_expression, command, status, exclusive_lock, "
+            "timeout_seconds, max_retries, retry_delay_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (job.name, job.cron_expression, job.command, job.status.value,
+             job.exclusive_lock, job.timeout_seconds, job.max_retries,
+             job.retry_delay_seconds),
         )
         self.conn.commit()
         job.id = cur.lastrowid
@@ -147,9 +214,11 @@ class Database:
     def update_job(self, job: Job) -> None:
         self.conn.execute(
             "UPDATE jobs SET name=?, cron_expression=?, command=?, status=?, "
-            "exclusive_lock=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            "exclusive_lock=?, timeout_seconds=?, max_retries=?, "
+            "retry_delay_seconds=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (job.name, job.cron_expression, job.command, job.status.value,
-             job.exclusive_lock, job.id),
+             job.exclusive_lock, job.timeout_seconds, job.max_retries,
+             job.retry_delay_seconds, job.id),
         )
         self.conn.commit()
 
@@ -184,10 +253,18 @@ class Database:
         )
         self.conn.commit()
 
+    def get_execution(self, execution_id: int) -> Optional[ExecutionRecord]:
+        row = self.conn.execute(
+            "SELECT * FROM execution_history WHERE id = ?", (execution_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_execution(row)
+
     def get_execution_history(self, job_id: int, limit: int = 10) -> list[ExecutionRecord]:
         rows = self.conn.execute(
             "SELECT * FROM execution_history WHERE job_id = ? "
-            "ORDER BY started_at DESC LIMIT ?",
+            "ORDER BY id DESC LIMIT ?",
             (job_id, limit),
         ).fetchall()
         return [self._row_to_execution(r) for r in rows]
@@ -271,6 +348,9 @@ class Database:
             command=row["command"],
             status=JobStatus(row["status"]),
             exclusive_lock=row["exclusive_lock"],
+            timeout_seconds=row["timeout_seconds"],
+            max_retries=row["max_retries"],
+            retry_delay_seconds=row["retry_delay_seconds"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
