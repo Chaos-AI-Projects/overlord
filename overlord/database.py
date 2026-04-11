@@ -114,8 +114,19 @@ class Database:
 
     @property
     def conn(self) -> sqlite3.Connection:
-        """Return a thread-local database connection."""
+        """Return a thread-local database connection.
+
+        If the thread's cached connection was closed (e.g. by close_all()),
+        it is discarded and a fresh connection is created transparently.
+        """
         c = getattr(self._local, "conn", None)
+        if c is not None:
+            try:
+                c.execute("SELECT 1")
+            except sqlite3.ProgrammingError:
+                # Connection was closed (e.g. by close_all()); discard it.
+                self._local.conn = None
+                c = None
         if c is None:
             c = self._make_connection()
             self._local.conn = c
@@ -186,7 +197,13 @@ class Database:
             self._local.conn = None
 
     def close_all(self) -> None:
-        """Close all thread-local connections. Call during shutdown."""
+        """Close all tracked connections. Call only during final shutdown.
+
+        Note: this does not reset each thread's ``_local.conn`` reference.
+        The ``conn`` property detects stale (closed) connections and
+        transparently replaces them, so post-shutdown access is safe but
+        should be avoided in normal operation.
+        """
         with self._all_conns_lock:
             for c in self._all_conns:
                 try:
