@@ -102,6 +102,8 @@ class Database:
         self.db_path = db_path or DEFAULT_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
+        self._all_conns: list[sqlite3.Connection] = []
+        self._all_conns_lock = threading.Lock()
 
     def _make_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
@@ -117,6 +119,8 @@ class Database:
         if c is None:
             c = self._make_connection()
             self._local.conn = c
+            with self._all_conns_lock:
+                self._all_conns.append(c)
         return c
 
     def init_schema(self) -> None:
@@ -170,10 +174,26 @@ class Database:
             )
 
     def close(self) -> None:
+        """Close the calling thread's connection."""
         c = getattr(self._local, "conn", None)
         if c is not None:
             c.close()
+            with self._all_conns_lock:
+                try:
+                    self._all_conns.remove(c)
+                except ValueError:
+                    pass
             self._local.conn = None
+
+    def close_all(self) -> None:
+        """Close all thread-local connections. Call during shutdown."""
+        with self._all_conns_lock:
+            for c in self._all_conns:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+            self._all_conns.clear()
 
     # -- Job CRUD --
 

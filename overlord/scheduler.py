@@ -125,7 +125,7 @@ class Scheduler:
         active = [t for t in self._running_tasks.values() if not t.done()]
         if not active:
             logger.info("No running jobs, shutdown complete")
-            self._db.close()
+            self._db.close_all()
             return
 
         logger.info("Waiting for %d running job(s) to finish…", len(active))
@@ -139,5 +139,5 @@ class Scheduler:
             await asyncio.wait(pending, timeout=5)
 
         self._db.release_stale_locks()
-        self._db.close()
+        self._db.close_all()
         logger.info("Shutdown complete")

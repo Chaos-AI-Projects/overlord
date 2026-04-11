@@ -68,7 +68,8 @@ def _parse_field(field: str, field_index: int) -> set[int]:
                 start, end = lo, hi
             elif "-" in range_part:
                 a, b = range_part.split("-", 1)
-                start, end = int(a), int(b)
+                start = int(_resolve_name(a, field_index))
+                end = int(_resolve_name(b, field_index))
             else:
                 start, end = int(range_part), hi
             for v in range(start, end + 1, step):
