@@ -2,6 +2,7 @@
 
 import json
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Optional
 
@@ -104,7 +105,10 @@ def create_mcp_server(db_path: Optional[Path] = None):
             max_retries=max_retries,
             retry_delay_seconds=retry_delay_seconds,
         )
-        created = db.create_job(job)
+        try:
+            created = db.create_job(job)
+        except sqlite3.IntegrityError:
+            return json.dumps({"error": f"Job '{name}' already exists"})
         logger.info("Registered job %r (id=%s)", created.name, created.id)
         return json.dumps(_job_to_dict(created))
 

@@ -153,6 +153,22 @@ class TestToolsIntegration:
         assert result["max_retries"] == 3
         db.close()
 
+    def test_register_job_duplicate_name(self, tools):
+        tool_map, db = tools
+        tool_map["register_job"](
+            name="dup-job",
+            cron_expression="* * * * *",
+            command="echo first",
+        )
+        result = json.loads(tool_map["register_job"](
+            name="dup-job",
+            cron_expression="*/5 * * * *",
+            command="echo second",
+        ))
+        assert "error" in result
+        assert "already exists" in result["error"]
+        db.close()
+
     def test_unregister_job(self, tools):
         tool_map, db = tools
         tool_map["register_job"](
