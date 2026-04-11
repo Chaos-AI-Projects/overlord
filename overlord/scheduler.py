@@ -19,6 +19,7 @@ from typing import Optional
 from .cron import CronExpression
 from .database import Database
 from .executor import run_job
+from .message_hub import MessageHub
 from .models import JobStatus
 
 logger = logging.getLogger("overlord.scheduler")
@@ -33,12 +34,26 @@ class Scheduler:
         await scheduler.run()
     """
 
-    def __init__(self, db_path: Optional[Path] = None, tick_seconds: int = 60):
+    def __init__(
+        self,
+        db_path: Optional[Path] = None,
+        tick_seconds: int = 60,
+        handler_command: Optional[str] = None,
+        poll_seconds: int = 10,
+    ):
         self._db = Database(db_path)
         self._tick_seconds = tick_seconds
         self._stop_event = asyncio.Event()
         self._cancel_event = asyncio.Event()
         self._running_tasks: dict[int, asyncio.Task] = {}
+        self._message_hub: Optional[MessageHub] = None
+        self._hub_task: Optional[asyncio.Task] = None
+        if handler_command is not None:
+            self._message_hub = MessageHub(
+                db=self._db,
+                handler_command=handler_command,
+                poll_seconds=poll_seconds,
+            )
 
     async def run(self) -> None:
         """Start the scheduler loop.  Blocks until shutdown signal received."""
@@ -50,6 +65,13 @@ class Scheduler:
             logger.info("Released %d stale lock(s) from previous run", released)
 
         self._install_signal_handlers()
+
+        if self._message_hub is not None:
+            self._hub_task = asyncio.create_task(
+                self._message_hub.run(), name="message-hub"
+            )
+            logger.info("Message hub co-started with scheduler")
+
         logger.info("Scheduler started (tick=%ds)", self._tick_seconds)
 
         try:
@@ -122,6 +144,15 @@ class Scheduler:
 
     async def _shutdown(self) -> None:
         """Wait for running jobs to finish, with a grace period."""
+        # Stop the message hub first.
+        if self._message_hub is not None:
+            await self._message_hub.stop()
+        if self._hub_task is not None and not self._hub_task.done():
+            try:
+                await asyncio.wait_for(self._hub_task, timeout=5)
+            except asyncio.TimeoutError:
+                self._hub_task.cancel()
+
         active = [t for t in self._running_tasks.values() if not t.done()]
         if not active:
             logger.info("No running jobs, shutdown complete")

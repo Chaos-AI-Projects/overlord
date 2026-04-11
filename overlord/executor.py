@@ -1,10 +1,11 @@
 """Async job executor — runs shell commands as subprocesses.
 
 Handles timeout enforcement, stdout/stderr capture, lock acquisition/release,
-and retry logic.
+retry logic, and message production for the message hub.
 """
 
 import asyncio
+import json
 import logging
 from typing import Optional
 
@@ -81,6 +82,8 @@ async def run_job(
         db.finish_execution(record.id, ExecutionStatus.FAILED,
                             stderr="Cancelled before execution")
         last_record = db.get_execution(record.id)
+
+    _produce_message(job, last_record, db)
     return last_record
 
 
@@ -139,3 +142,18 @@ def _reload_record(db: Database, record: ExecutionRecord) -> ExecutionRecord:
     """Re-read the execution record from the DB to pick up finish timestamp."""
     reloaded = db.get_execution(record.id)
     return reloaded if reloaded is not None else record
+
+
+def _produce_message(job: Job, record: ExecutionRecord, db: Database) -> None:
+    """Create a message from a completed job execution for the message hub."""
+    payload = json.dumps({
+        "job_name": job.name,
+        "job_id": job.id,
+        "execution_id": record.id,
+        "status": record.status.value,
+        "exit_code": record.exit_code,
+        "stdout": record.stdout,
+        "stderr": record.stderr,
+    })
+    db.create_message(job.id, payload)
+    logger.debug("job=%s execution=%d produced message", job.name, record.id)
