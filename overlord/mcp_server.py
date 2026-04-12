@@ -43,13 +43,27 @@ def _execution_to_dict(rec) -> dict:
     }
 
 
-def create_mcp_server(db_path: Optional[Path] = None):
+def create_mcp_server(
+    db_path: Optional[Path] = None,
+    db: Optional["Database"] = None,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+):
     """Create and return a FastMCP server wired to the given database.
 
     Parameters
     ----------
     db_path : Path, optional
         Path to the SQLite database.  Falls back to DEFAULT_DB_PATH.
+        Ignored when *db* is provided.
+    db : Database, optional
+        An existing Database instance to reuse (e.g. shared with the
+        scheduler).  When provided, the caller is responsible for
+        schema initialisation and lifecycle management.
+    host : str
+        Bind address for the streamable-HTTP transport (default ``127.0.0.1``).
+    port : int
+        Port for the streamable-HTTP transport (default ``8000``).
 
     Returns
     -------
@@ -58,9 +72,10 @@ def create_mcp_server(db_path: Optional[Path] = None):
     """
     from mcp.server.fastmcp import FastMCP
 
-    mcp = FastMCP("overlord-job-registry")
-    db = Database(db_path=db_path)
-    db.init_schema()
+    mcp = FastMCP("overlord-job-registry", host=host, port=port)
+    if db is None:
+        db = Database(db_path=db_path)
+        db.init_schema()
 
     @mcp.tool()
     def register_job(

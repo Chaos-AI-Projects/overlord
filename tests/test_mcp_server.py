@@ -23,10 +23,41 @@ def mcp_server(tmp_path):
     return create_mcp_server(db_path=tmp_path / "mcp_test.db")
 
 
+@pytest.fixture
+def mcp_server_shared_db(db):
+    """Create an MCP server that shares an existing Database instance."""
+    return create_mcp_server(db=db, host="127.0.0.1", port=9999)
+
+
 class TestCreateMcpServer:
     def test_server_creates_successfully(self, mcp_server):
         assert mcp_server is not None
         assert mcp_server.name == "overlord-job-registry"
+
+    def test_server_with_shared_db(self, mcp_server_shared_db):
+        assert mcp_server_shared_db is not None
+        assert mcp_server_shared_db.name == "overlord-job-registry"
+        assert mcp_server_shared_db.settings.host == "127.0.0.1"
+        assert mcp_server_shared_db.settings.port == 9999
+
+    def test_server_custom_host_port(self, tmp_path):
+        server = create_mcp_server(
+            db_path=tmp_path / "custom.db", host="0.0.0.0", port=7777,
+        )
+        assert server.settings.host == "0.0.0.0"
+        assert server.settings.port == 7777
+
+    def test_shared_db_tools_work(self, db, mcp_server_shared_db):
+        """Tools on a shared-DB server should read/write the same database."""
+        tools = {t.name: t for t in mcp_server_shared_db._tool_manager.list_tools()}
+        result = json.loads(tools["register_job"].fn(
+            name="shared-job",
+            cron_expression="* * * * *",
+            command="echo shared",
+        ))
+        assert result["name"] == "shared-job"
+        # Verify the shared db sees the job
+        assert db.get_job_by_name("shared-job") is not None
 
 
 class TestRegisterJob:

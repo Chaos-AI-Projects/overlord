@@ -19,6 +19,7 @@ from typing import Optional
 from .cron import CronExpression
 from .database import Database
 from .executor import run_job
+from .mcp_server import create_mcp_server
 from .message_hub import MessageHub
 from .models import JobStatus
 
@@ -40,6 +41,8 @@ class Scheduler:
         tick_seconds: int = 60,
         handler_command: Optional[str] = None,
         poll_seconds: int = 10,
+        mcp_host: Optional[str] = None,
+        mcp_port: int = 8000,
     ):
         self._db = Database(db_path)
         self._tick_seconds = tick_seconds
@@ -48,11 +51,17 @@ class Scheduler:
         self._running_tasks: dict[int, asyncio.Task] = {}
         self._message_hub: Optional[MessageHub] = None
         self._hub_task: Optional[asyncio.Task] = None
+        self._mcp_server = None
+        self._mcp_task: Optional[asyncio.Task] = None
         if handler_command is not None:
             self._message_hub = MessageHub(
                 db=self._db,
                 handler_command=handler_command,
                 poll_seconds=poll_seconds,
+            )
+        if mcp_host is not None:
+            self._mcp_server = create_mcp_server(
+                db=self._db, host=mcp_host, port=mcp_port,
             )
 
     async def run(self) -> None:
@@ -71,6 +80,16 @@ class Scheduler:
                 self._message_hub.run(), name="message-hub"
             )
             logger.info("Message hub co-started with scheduler")
+
+        if self._mcp_server is not None:
+            self._mcp_task = asyncio.create_task(
+                self._run_mcp_server(), name="mcp-server"
+            )
+            logger.info(
+                "MCP server co-started with scheduler on %s:%d",
+                self._mcp_server.settings.host,
+                self._mcp_server.settings.port,
+            )
 
         logger.info("Scheduler started (tick=%ds)", self._tick_seconds)
 
@@ -93,6 +112,10 @@ class Scheduler:
         self._stop_event.set()
 
     # -- internals --
+
+    async def _run_mcp_server(self) -> None:
+        """Run the MCP streamable-HTTP server."""
+        await self._mcp_server.run_streamable_http_async()
 
     def _install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
@@ -152,6 +175,15 @@ class Scheduler:
                 await asyncio.wait_for(self._hub_task, timeout=5)
             except asyncio.TimeoutError:
                 self._hub_task.cancel()
+
+        # Stop the MCP server.
+        if self._mcp_task is not None and not self._mcp_task.done():
+            self._mcp_task.cancel()
+            try:
+                await asyncio.wait_for(self._mcp_task, timeout=5)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            logger.info("MCP server stopped")
 
         active = [t for t in self._running_tasks.values() if not t.done()]
         if not active:

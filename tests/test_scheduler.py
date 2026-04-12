@@ -107,6 +107,28 @@ class TestScheduler:
         await asyncio.gather(*scheduler._running_tasks.values(), return_exceptions=True)
 
 
+class TestSchedulerWithMcp:
+    @pytest.mark.asyncio
+    async def test_mcp_server_starts_and_stops(self, tmp_path):
+        """Scheduler with mcp_host should start and cleanly stop the MCP server."""
+        s = Scheduler(
+            db_path=tmp_path / "test.db",
+            tick_seconds=1,
+            mcp_host="127.0.0.1",
+            mcp_port=0,  # port 0 won't actually bind in this test
+        )
+        s._db.init_schema()
+
+        assert s._mcp_server is not None
+        assert s._mcp_server.name == "overlord-job-registry"
+
+    @pytest.mark.asyncio
+    async def test_no_mcp_by_default(self, scheduler):
+        """Without mcp_host, no MCP server should be created."""
+        assert scheduler._mcp_server is None
+        assert scheduler._mcp_task is None
+
+
 class TestSchemaVersionCheck:
     @pytest.mark.asyncio
     async def test_run_checks_schema(self, tmp_path):
