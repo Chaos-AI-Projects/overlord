@@ -1,5 +1,6 @@
 """MCP server exposing Overlord job registry for agent-driven job management."""
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from .database import DEFAULT_DB_PATH, Database
+from .executor import run_job
 from .models import Job, JobStatus
 
 logger = logging.getLogger(__name__)
@@ -194,5 +196,38 @@ def create_mcp_server(
         result = _job_to_dict(job)
         result["recent_executions"] = [_execution_to_dict(e) for e in executions]
         return json.dumps(result)
+
+    @mcp.tool()
+    async def trigger_job(name: str) -> str:
+        """Manually trigger a job to run immediately, ignoring its cron schedule.
+
+        The job runs asynchronously in the background.  Use ``get_job_status``
+        to check the result once it completes.
+
+        Parameters
+        ----------
+        name : str
+            The unique name of the job to trigger.
+
+        Returns
+        -------
+        str
+            JSON object with the execution id or an error message.
+        """
+        job = db.get_job_by_name(name)
+        if job is None:
+            return json.dumps({"error": f"Job '{name}' not found"})
+
+        async def _run() -> None:
+            try:
+                await run_job(job, db)
+            except Exception:
+                logger.exception("trigger_job: background execution failed for %r", name)
+
+        task = asyncio.create_task(_run(), name=f"trigger-{name}")
+        # Give the task a moment so the execution record is created.
+        await asyncio.sleep(0.05)
+        logger.info("Manually triggered job %r", name)
+        return json.dumps({"status": "triggered", "job": _job_to_dict(job)})
 
     return mcp

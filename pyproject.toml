@@ -18,6 +18,9 @@ test = [
     "pytest-asyncio",
 ]
 
+[project.scripts]
+overlord = "overlord.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["overlord*"]
 
