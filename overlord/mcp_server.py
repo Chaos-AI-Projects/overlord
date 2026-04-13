@@ -9,7 +9,7 @@ from typing import Optional
 
 from .database import DEFAULT_DB_PATH, Database
 from .executor import run_job
-from .models import Job, JobOutput, JobOutputError, JobStatus
+from .models import ExecutionStatus, Job, JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +31,12 @@ def _job_to_dict(job: Job) -> dict:
     }
 
 
-def _execution_to_dict(rec) -> dict:
-    """Convert an ExecutionRecord to a JSON-serialisable dictionary."""
-    from .models import ExecutionStatus
+def _execution_to_dict(rec, db: Optional["Database"] = None) -> dict:
+    """Convert an ExecutionRecord to a JSON-serialisable dictionary.
 
+    When *db* is provided, structured output is retrieved from the already-
+    parsed message in the message hub rather than re-parsing stdout.
+    """
     result = {
         "id": rec.id,
         "job_id": rec.job_id,
@@ -45,15 +47,20 @@ def _execution_to_dict(rec) -> dict:
         "stdout": rec.stdout,
         "stderr": rec.stderr,
     }
-    if rec.status == ExecutionStatus.SUCCESS and rec.stdout:
-        try:
-            output = JobOutput.from_stdout(rec.stdout)
-            result["structured_output"] = {
-                "consumers": output.consumers,
-                "message": output.message,
-            }
-        except JobOutputError:
-            pass
+    if rec.status == ExecutionStatus.SUCCESS and rec.stdout and db is not None:
+        # Retrieve structured output from the message that was already
+        # produced during execution, avoiding a redundant parse of stdout.
+        for msg in db.get_messages_by_job(rec.job_id, limit=5):
+            try:
+                payload = json.loads(msg.payload)
+                if payload.get("execution_id") == rec.id and "message" in payload:
+                    result["structured_output"] = {
+                        "consumers": msg.consumers,
+                        "message": payload["message"],
+                    }
+                    break
+            except (json.JSONDecodeError, KeyError):
+                pass
     return result
 
 
@@ -206,7 +213,7 @@ def create_mcp_server(
             return json.dumps({"error": f"Job '{name}' not found"})
         executions = db.get_execution_history(job.id, limit=5)
         result = _job_to_dict(job)
-        result["recent_executions"] = [_execution_to_dict(e) for e in executions]
+        result["recent_executions"] = [_execution_to_dict(e, db=db) for e in executions]
         return json.dumps(result)
 
     @mcp.tool()

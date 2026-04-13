@@ -210,4 +210,7 @@ def _produce_message(
         })
         db.create_message(job.id, payload)
         logger.debug("job=%s execution=%d produced message", job.name, record.id)
-    return record
+    # Always return a fresh record from the DB so both success and failure
+    # paths behave consistently.
+    refreshed = db.get_execution(record.id)
+    return refreshed if refreshed is not None else record

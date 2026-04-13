@@ -345,6 +345,15 @@ class Database:
         )
         self.conn.commit()
 
+    def get_messages_by_job(self, source_job_id: int, limit: int = 10) -> list[Message]:
+        """Return recent messages for a given job, newest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM messages WHERE source_job_id = ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (source_job_id, limit),
+        ).fetchall()
+        return [self._row_to_message(r) for r in rows]
+
     # -- Locks --
 
     def acquire_lock(self, lock_name: str, execution_id: int) -> bool:
