@@ -1,9 +1,10 @@
 """Data models for the Overlord repeatable tasks manager."""
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Optional, Union
 
 
 class JobStatus(str, Enum):
@@ -60,10 +61,71 @@ class Message:
 
     source_job_id: int
     payload: str
+    consumers: list[str] = field(default_factory=list)
     created_at: Optional[datetime] = None
     consumed: bool = False
     consumed_at: Optional[datetime] = None
     id: Optional[int] = None
+
+
+class JobOutputError(Exception):
+    """Raised when job stdout does not match the expected output schema."""
+
+
+@dataclass
+class JobOutput:
+    """Structured output schema for job stdout.
+
+    Jobs that succeed (exit 0) must emit JSON on stdout matching this schema.
+    If stdout does not match, the execution is marked as failed.
+    """
+
+    consumers: list[str]
+    message: Union[str, dict]
+
+    @classmethod
+    def from_stdout(cls, stdout: str) -> "JobOutput":
+        """Parse and validate job stdout as a JobOutput.
+
+        Raises JobOutputError if the stdout is not valid JSON or does not
+        conform to the expected schema.
+        """
+        if not stdout or not stdout.strip():
+            raise JobOutputError("Job produced no output on stdout")
+
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise JobOutputError(f"Job stdout is not valid JSON: {exc}") from exc
+
+        if not isinstance(data, dict):
+            raise JobOutputError(
+                f"Job stdout must be a JSON object, got {type(data).__name__}"
+            )
+
+        if "consumers" not in data:
+            raise JobOutputError("Missing required field: 'consumers'")
+        if "message" not in data:
+            raise JobOutputError("Missing required field: 'message'")
+
+        consumers = data["consumers"]
+        if not isinstance(consumers, list):
+            raise JobOutputError(
+                f"'consumers' must be a list, got {type(consumers).__name__}"
+            )
+        for i, c in enumerate(consumers):
+            if not isinstance(c, str):
+                raise JobOutputError(
+                    f"'consumers[{i}]' must be a string, got {type(c).__name__}"
+                )
+
+        message = data["message"]
+        if not isinstance(message, (str, dict)):
+            raise JobOutputError(
+                f"'message' must be a string or object, got {type(message).__name__}"
+            )
+
+        return cls(consumers=consumers, message=message)
 
 
 @dataclass

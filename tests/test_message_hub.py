@@ -34,7 +34,8 @@ class TestMessageProduction:
 
     @pytest.mark.asyncio
     async def test_successful_job_produces_message(self, db):
-        job = make_job(db, command="echo produced")
+        output = json.dumps({"consumers": [], "message": "produced"})
+        job = make_job(db, command=f"echo '{output}'")
         await run_job(job, db)
 
         messages = db.poll_messages()
@@ -43,7 +44,7 @@ class TestMessageProduction:
         payload = json.loads(messages[0].payload)
         assert payload["job_name"] == "test-job"
         assert payload["status"] == "success"
-        assert "produced" in payload["stdout"]
+        assert payload["message"] == "produced"
 
     @pytest.mark.asyncio
     async def test_failed_job_produces_message(self, db):

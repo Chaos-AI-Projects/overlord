@@ -1,5 +1,6 @@
 """SQLite database layer for the Overlord repeatable tasks manager."""
 
+import json
 import os
 import sqlite3
 import threading
@@ -19,7 +20,7 @@ DEFAULT_DB_PATH = Path(
     os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
 ) / "overlord" / "overlord.db"
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -57,6 +58,7 @@ CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_job_id INTEGER NOT NULL,
     payload TEXT NOT NULL,
+    consumers TEXT NOT NULL DEFAULT '[]',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     consumed INTEGER NOT NULL DEFAULT 0,
     consumed_at TIMESTAMP,
@@ -83,6 +85,9 @@ MIGRATIONS = {
         "ALTER TABLE jobs ADD COLUMN timeout_seconds INTEGER",
         "ALTER TABLE jobs ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE jobs ADD COLUMN retry_delay_seconds INTEGER NOT NULL DEFAULT 0",
+    ],
+    3: [
+        "ALTER TABLE messages ADD COLUMN consumers TEXT NOT NULL DEFAULT '[]'",
     ],
 }
 
@@ -308,13 +313,21 @@ class Database:
 
     # -- Messages --
 
-    def create_message(self, source_job_id: int, payload: str) -> Message:
+    def create_message(
+        self, source_job_id: int, payload: str,
+        consumers: Optional[list[str]] = None,
+    ) -> Message:
+        consumers_list = consumers or []
+        consumers_json = json.dumps(consumers_list)
         cur = self.conn.execute(
-            "INSERT INTO messages (source_job_id, payload) VALUES (?, ?)",
-            (source_job_id, payload),
+            "INSERT INTO messages (source_job_id, payload, consumers) VALUES (?, ?, ?)",
+            (source_job_id, payload, consumers_json),
         )
         self.conn.commit()
-        return Message(id=cur.lastrowid, source_job_id=source_job_id, payload=payload)
+        return Message(
+            id=cur.lastrowid, source_job_id=source_job_id,
+            payload=payload, consumers=consumers_list,
+        )
 
     def poll_messages(self, limit: int = 10) -> list[Message]:  # Phase 3: poll-based consumption
         rows = self.conn.execute(
@@ -407,10 +420,13 @@ class Database:
 
     @staticmethod
     def _row_to_message(row: sqlite3.Row) -> Message:
+        consumers_raw = row["consumers"]
+        consumers = json.loads(consumers_raw) if consumers_raw else []
         return Message(
             id=row["id"],
             source_job_id=row["source_job_id"],
             payload=row["payload"],
+            consumers=consumers,
             created_at=row["created_at"],
             consumed=bool(row["consumed"]),
             consumed_at=row["consumed_at"],

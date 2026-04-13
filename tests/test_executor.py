@@ -1,12 +1,17 @@
 """Tests for the async job executor."""
 
 import asyncio
+import json
 
 import pytest
 
 from overlord.database import Database
 from overlord.executor import run_job
 from overlord.models import ExecutionStatus, Job, JobStatus
+
+
+# Valid structured output for jobs that need to succeed.
+_VALID_OUTPUT = json.dumps({"consumers": [], "message": "ok"})
 
 
 @pytest.fixture
@@ -30,11 +35,10 @@ def make_job(db, **kwargs) -> Job:
 class TestExecutor:
     @pytest.mark.asyncio
     async def test_successful_command(self, db):
-        job = make_job(db, command="echo hello world")
+        job = make_job(db, command=f"echo '{_VALID_OUTPUT}'")
         record = await run_job(job, db)
         assert record.status == ExecutionStatus.SUCCESS
         assert record.exit_code == 0
-        assert "hello world" in record.stdout
 
     @pytest.mark.asyncio
     async def test_failed_command(self, db):
@@ -45,7 +49,7 @@ class TestExecutor:
 
     @pytest.mark.asyncio
     async def test_stderr_capture(self, db):
-        job = make_job(db, command="echo err >&2")
+        job = make_job(db, command=f"echo '{_VALID_OUTPUT}' && echo err >&2")
         record = await run_job(job, db)
         assert record.status == ExecutionStatus.SUCCESS
         assert "err" in record.stderr
@@ -58,7 +62,7 @@ class TestExecutor:
 
     @pytest.mark.asyncio
     async def test_exclusive_lock(self, db):
-        job = make_job(db, command="echo locked", exclusive_lock="deploy")
+        job = make_job(db, command=f"echo '{_VALID_OUTPUT}'", exclusive_lock="deploy")
         record = await run_job(job, db)
         assert record.status == ExecutionStatus.SUCCESS
         # Lock should be released after execution.

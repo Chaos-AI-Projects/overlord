@@ -1,6 +1,7 @@
 """Tests for the scheduler."""
 
 import asyncio
+import json
 
 import pytest
 
@@ -29,10 +30,11 @@ class TestScheduler:
     async def test_tick_launches_due_job(self, scheduler):
         """A job matching the current minute should be launched on tick."""
         # Use '* * * * *' so it always matches.
+        output = json.dumps({"consumers": [], "message": "tick"})
         scheduler._db.create_job(Job(
             name="always-due",
             cron_expression="* * * * *",
-            command="echo tick",
+            command=f"echo '{output}'",
         ))
 
         await scheduler._tick()

@@ -9,7 +9,7 @@ from typing import Optional
 
 from .database import DEFAULT_DB_PATH, Database
 from .executor import run_job
-from .models import Job, JobStatus
+from .models import Job, JobOutput, JobOutputError, JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,9 @@ def _job_to_dict(job: Job) -> dict:
 
 def _execution_to_dict(rec) -> dict:
     """Convert an ExecutionRecord to a JSON-serialisable dictionary."""
-    return {
+    from .models import ExecutionStatus
+
+    result = {
         "id": rec.id,
         "job_id": rec.job_id,
         "status": rec.status.value,
@@ -43,6 +45,16 @@ def _execution_to_dict(rec) -> dict:
         "stdout": rec.stdout,
         "stderr": rec.stderr,
     }
+    if rec.status == ExecutionStatus.SUCCESS and rec.stdout:
+        try:
+            output = JobOutput.from_stdout(rec.stdout)
+            result["structured_output"] = {
+                "consumers": output.consumers,
+                "message": output.message,
+            }
+        except JobOutputError:
+            pass
+    return result
 
 
 def create_mcp_server(

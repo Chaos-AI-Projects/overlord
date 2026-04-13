@@ -152,5 +152,6 @@ def _message_to_dict(msg: Message) -> dict:
         "message_id": msg.id,
         "source_job_id": msg.source_job_id,
         "payload": msg.payload,
+        "consumers": msg.consumers,
         "created_at": str(msg.created_at) if msg.created_at else None,
     }

@@ -10,7 +10,7 @@ import logging
 from typing import Optional
 
 from .database import Database
-from .models import ExecutionRecord, ExecutionStatus, Job
+from .models import ExecutionRecord, ExecutionStatus, Job, JobOutput, JobOutputError
 
 logger = logging.getLogger("overlord.executor")
 
@@ -83,7 +83,7 @@ async def run_job(
                             stderr="Cancelled before execution")
         last_record = db.get_execution(record.id)
 
-    _produce_message(job, last_record, db)
+    last_record = _produce_message(job, last_record, db)
     return last_record
 
 
@@ -144,16 +144,70 @@ def _reload_record(db: Database, record: ExecutionRecord) -> ExecutionRecord:
     return reloaded if reloaded is not None else record
 
 
-def _produce_message(job: Job, record: ExecutionRecord, db: Database) -> None:
-    """Create a message from a completed job execution for the message hub."""
-    payload = json.dumps({
-        "job_name": job.name,
-        "job_id": job.id,
-        "execution_id": record.id,
-        "status": record.status.value,
-        "exit_code": record.exit_code,
-        "stdout": record.stdout,
-        "stderr": record.stderr,
-    })
-    db.create_message(job.id, payload)
-    logger.debug("job=%s execution=%d produced message", job.name, record.id)
+def _produce_message(
+    job: Job, record: ExecutionRecord, db: Database,
+) -> ExecutionRecord:
+    """Create a message from a completed job execution for the message hub.
+
+    For successful executions, stdout is parsed as a structured JobOutput
+    (with ``consumers`` and ``message`` fields).  If parsing fails, the
+    execution is retroactively marked as FAILED and the validation error
+    is recorded.
+
+    For non-successful executions (failed/timeout), the raw execution
+    details are used as the message payload without schema validation.
+
+    Returns the (possibly updated) execution record.
+    """
+    if record.status == ExecutionStatus.SUCCESS:
+        try:
+            output = JobOutput.from_stdout(record.stdout or "")
+        except JobOutputError as exc:
+            logger.warning(
+                "job=%s execution=%d output schema validation failed: %s",
+                job.name, record.id, exc,
+            )
+            db.finish_execution(
+                record.id, ExecutionStatus.FAILED,
+                exit_code=record.exit_code,
+                stdout=record.stdout,
+                stderr=f"Output schema validation failed: {exc}",
+            )
+            payload = json.dumps({
+                "job_name": job.name,
+                "job_id": job.id,
+                "execution_id": record.id,
+                "status": ExecutionStatus.FAILED.value,
+                "exit_code": record.exit_code,
+                "error": f"Output schema validation failed: {exc}",
+            })
+            db.create_message(job.id, payload)
+            logger.debug("job=%s execution=%d produced error message", job.name, record.id)
+            return db.get_execution(record.id)
+
+        payload = json.dumps({
+            "job_name": job.name,
+            "job_id": job.id,
+            "execution_id": record.id,
+            "status": record.status.value,
+            "exit_code": record.exit_code,
+            "message": output.message,
+        })
+        db.create_message(job.id, payload, consumers=output.consumers)
+        logger.debug(
+            "job=%s execution=%d produced message consumers=%s",
+            job.name, record.id, output.consumers,
+        )
+    else:
+        payload = json.dumps({
+            "job_name": job.name,
+            "job_id": job.id,
+            "execution_id": record.id,
+            "status": record.status.value,
+            "exit_code": record.exit_code,
+            "stdout": record.stdout,
+            "stderr": record.stderr,
+        })
+        db.create_message(job.id, payload)
+        logger.debug("job=%s execution=%d produced message", job.name, record.id)
+    return record
