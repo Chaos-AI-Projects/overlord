@@ -65,14 +65,15 @@ def _print_messages(raw: str) -> None:
         print("No messages found.")
         return
 
-    fmt = "{:<6} {:<10} {:<10} {:<25} {:<30}"
-    print(fmt.format("ID", "JOB_ID", "CONSUMED", "CONSUMERS", "CREATED"))
-    print("-" * 83)
+    fmt = "{:<6} {:<20} {:<10} {:<25} {:<30}"
+    print(fmt.format("ID", "JOB", "CONSUMED", "CONSUMERS", "CREATED"))
+    print("-" * 93)
     for m in messages:
         consumers = ", ".join(m.get("consumers", []))
+        job_label = m.get("source_job_name") or str(m.get("source_job_id", ""))
         print(fmt.format(
             m.get("id", ""),
-            m.get("source_job_id", ""),
+            job_label[:20],
             "yes" if m.get("consumed") else "no",
             consumers[:25],
             str(m.get("created_at", ""))[:30],

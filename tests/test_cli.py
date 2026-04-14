@@ -195,14 +195,16 @@ class TestPrintMessages:
 
     def test_normal_output(self, capsys):
         messages = [
-            {"id": 1, "source_job_id": 5, "consumed": False,
+            {"id": 1, "source_job_id": 5, "source_job_name": "my-job", "consumed": False,
              "consumers": ["agent", "logger"], "created_at": "2026-01-01 00:00:00"},
-            {"id": 2, "source_job_id": 5, "consumed": True,
+            {"id": 2, "source_job_id": 5, "source_job_name": "my-job", "consumed": True,
              "consumers": [], "created_at": "2026-01-01 00:01:00"},
         ]
         _print_messages(json.dumps(messages))
         out = capsys.readouterr().out
         assert "ID" in out
+        assert "JOB" in out
+        assert "my-job" in out
         assert "agent, logger" in out
         assert "yes" in out
         assert "no" in out

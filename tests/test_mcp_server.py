@@ -298,6 +298,7 @@ class TestToolsIntegration:
         db.create_message(job.id, '{"test": false}', consumers=["logger"])
         result = json.loads(tool_map["query_messages"]())
         assert len(result) == 2
+        assert all(r["source_job_name"] == "msg-job" for r in result)
         db.close()
 
     def test_query_messages_by_job(self, tools):
@@ -310,6 +311,7 @@ class TestToolsIntegration:
         db.create_message(jb.id, "from-b")
         result = json.loads(tool_map["query_messages"](source_job_name="qm-a"))
         assert len(result) == 1
+        assert result[0]["source_job_name"] == "qm-a"
         db.close()
 
     def test_query_messages_by_consumer(self, tools):

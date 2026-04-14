@@ -388,9 +388,11 @@ class Database:
             params.append(source_job_name)
 
         if consumer is not None:
-            # consumers is stored as a JSON array; use LIKE for matching
-            clauses.append("consumers LIKE ?")
-            params.append(f'%"{consumer}"%')
+            # consumers is stored as a JSON array; use json_each for exact matching
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_each(messages.consumers) WHERE json_each.value = ?)"
+            )
+            params.append(consumer)
 
         if consumed is not None:
             clauses.append("consumed = ?")

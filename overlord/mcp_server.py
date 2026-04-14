@@ -250,6 +250,8 @@ def create_mcp_server(
             consumed=consumed,
             limit=limit,
         )
+        # Build job id→name map for the result set
+        job_name_cache: dict[int, str] = {}
         result = []
         for msg in messages:
             payload = msg.payload
@@ -257,9 +259,16 @@ def create_mcp_server(
                 payload = json.loads(payload)
             except (json.JSONDecodeError, TypeError):
                 pass
+            # Resolve source job name
+            job_name = job_name_cache.get(msg.source_job_id)
+            if job_name is None:
+                job = db.get_job(msg.source_job_id)
+                job_name = job.name if job else None
+                job_name_cache[msg.source_job_id] = job_name
             result.append({
                 "id": msg.id,
                 "source_job_id": msg.source_job_id,
+                "source_job_name": job_name,
                 "payload": payload,
                 "consumers": msg.consumers,
                 "consumed": msg.consumed,
