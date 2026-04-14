@@ -20,7 +20,7 @@ DEFAULT_DB_PATH = Path(
     os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
 ) / "overlord" / "overlord.db"
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -77,6 +77,7 @@ CREATE INDEX IF NOT EXISTS idx_execution_history_job_id ON execution_history(job
 CREATE INDEX IF NOT EXISTS idx_execution_history_status ON execution_history(status);
 CREATE INDEX IF NOT EXISTS idx_messages_consumed ON messages(consumed);
 CREATE INDEX IF NOT EXISTS idx_messages_source_job_id ON messages(source_job_id);
+CREATE INDEX IF NOT EXISTS idx_messages_consumers ON messages(consumers);
 """
 
 # Migrations from one schema version to the next.
@@ -88,6 +89,9 @@ MIGRATIONS = {
     ],
     3: [
         "ALTER TABLE messages ADD COLUMN consumers TEXT NOT NULL DEFAULT '[]'",
+    ],
+    4: [
+        "CREATE INDEX IF NOT EXISTS idx_messages_consumers ON messages(consumers)",
     ],
 }
 
@@ -352,6 +356,51 @@ class Database:
             "ORDER BY created_at DESC LIMIT ?",
             (source_job_id, limit),
         ).fetchall()
+        return [self._row_to_message(r) for r in rows]
+
+    def query_messages(
+        self,
+        source_job_name: Optional[str] = None,
+        consumer: Optional[str] = None,
+        consumed: Optional[bool] = None,
+        limit: int = 20,
+    ) -> list[Message]:
+        """Query messages with optional filters.
+
+        Parameters
+        ----------
+        source_job_name : str, optional
+            Filter by originating job name.
+        consumer : str, optional
+            Filter by consumer tag (searches the JSON consumers array).
+        consumed : bool, optional
+            Filter consumed (True) vs unconsumed (False) messages.
+        limit : int
+            Maximum number of results (default 20).
+        """
+        clauses: list[str] = []
+        params: list = []
+
+        if source_job_name is not None:
+            clauses.append(
+                "source_job_id = (SELECT id FROM jobs WHERE name = ?)"
+            )
+            params.append(source_job_name)
+
+        if consumer is not None:
+            # consumers is stored as a JSON array; use LIKE for matching
+            clauses.append("consumers LIKE ?")
+            params.append(f'%"{consumer}"%')
+
+        if consumed is not None:
+            clauses.append("consumed = ?")
+            params.append(1 if consumed else 0)
+
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f"SELECT * FROM messages{where} ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.conn.execute(sql, params).fetchall()
         return [self._row_to_message(r) for r in rows]
 
     # -- Locks --

@@ -49,6 +49,36 @@ def _print_json(raw: str) -> None:
         print(raw)
 
 
+def _print_messages(raw: str) -> None:
+    """Print a list of messages as a human-readable table."""
+    try:
+        messages = json.loads(raw)
+    except json.JSONDecodeError:
+        print(raw)
+        return
+
+    if isinstance(messages, dict) and "error" in messages:
+        print(f"Error: {messages['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    if not messages:
+        print("No messages found.")
+        return
+
+    fmt = "{:<6} {:<10} {:<10} {:<25} {:<30}"
+    print(fmt.format("ID", "JOB_ID", "CONSUMED", "CONSUMERS", "CREATED"))
+    print("-" * 83)
+    for m in messages:
+        consumers = ", ".join(m.get("consumers", []))
+        print(fmt.format(
+            m.get("id", ""),
+            m.get("source_job_id", ""),
+            "yes" if m.get("consumed") else "no",
+            consumers[:25],
+            str(m.get("created_at", ""))[:30],
+        ))
+
+
 def _print_job_table(raw: str) -> None:
     """Print a list of jobs as a human-readable table."""
     try:
@@ -202,6 +232,22 @@ def cmd_trigger(args: argparse.Namespace) -> None:
     print(f"Triggered job '{data['job']['name']}' — use 'overlord status {args.name}' to check progress")
 
 
+def cmd_messages(args: argparse.Namespace) -> None:
+    """Query messages in the message hub."""
+    arguments: dict = {}
+    if args.job:
+        arguments["source_job_name"] = args.job
+    if args.consumer:
+        arguments["consumer"] = args.consumer
+    if args.unconsumed:
+        arguments["unconsumed"] = True
+    if args.limit is not None:
+        arguments["limit"] = args.limit
+
+    raw = asyncio.run(_call_tool(args.mcp_url, "query_messages", arguments))
+    _print_messages(raw)
+
+
 # -- Argument parser --
 
 
@@ -257,6 +303,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_trig.add_argument("name", help="Job name")
     p_trig.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
     p_trig.set_defaults(func=cmd_trigger)
+
+    # messages
+    p_msg = sub.add_parser("messages", help="Query messages in the message hub")
+    p_msg.add_argument("--job", metavar="NAME", help="Filter by source job name")
+    p_msg.add_argument("--consumer", metavar="NAME", help="Filter by consumer tag")
+    p_msg.add_argument("--unconsumed", action="store_true", help="Show only unconsumed messages")
+    p_msg.add_argument("--limit", type=int, metavar="N", help="Maximum number of results")
+    p_msg.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
+    p_msg.set_defaults(func=cmd_messages)
 
     return parser
 

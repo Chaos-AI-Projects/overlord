@@ -11,8 +11,10 @@ from overlord.cli import (
     DEFAULT_MCP_URL,
     _print_job_status,
     _print_job_table,
+    _print_messages,
     build_parser,
     cmd_list,
+    cmd_messages,
     cmd_register,
     cmd_status,
     cmd_trigger,
@@ -87,6 +89,26 @@ class TestBuildParser:
         args = parser.parse_args(["trigger", "my-job"])
         assert args.command == "trigger"
         assert args.name == "my-job"
+
+    def test_messages_defaults(self):
+        parser = build_parser()
+        args = parser.parse_args(["messages"])
+        assert args.command == "messages"
+        assert args.job is None
+        assert args.consumer is None
+        assert args.unconsumed is False
+        assert args.limit is None
+
+    def test_messages_with_filters(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "messages", "--job", "my-job", "--consumer", "agent",
+            "--unconsumed", "--limit", "10",
+        ])
+        assert args.job == "my-job"
+        assert args.consumer == "agent"
+        assert args.unconsumed is True
+        assert args.limit == 10
 
     def test_custom_mcp_url(self):
         parser = build_parser()
@@ -166,6 +188,31 @@ class TestPrintJobStatus:
         assert "success" in out
 
 
+class TestPrintMessages:
+    def test_empty_list(self, capsys):
+        _print_messages("[]")
+        assert "No messages found" in capsys.readouterr().out
+
+    def test_normal_output(self, capsys):
+        messages = [
+            {"id": 1, "source_job_id": 5, "consumed": False,
+             "consumers": ["agent", "logger"], "created_at": "2026-01-01 00:00:00"},
+            {"id": 2, "source_job_id": 5, "consumed": True,
+             "consumers": [], "created_at": "2026-01-01 00:01:00"},
+        ]
+        _print_messages(json.dumps(messages))
+        out = capsys.readouterr().out
+        assert "ID" in out
+        assert "agent, logger" in out
+        assert "yes" in out
+        assert "no" in out
+
+    def test_error_response(self, capsys):
+        with pytest.raises(SystemExit):
+            _print_messages(json.dumps({"error": "something broke"}))
+        assert "something broke" in capsys.readouterr().err
+
+
 # -- Command handlers with mocked MCP calls --
 
 
@@ -233,6 +280,25 @@ class TestCommandHandlers:
         args = build_parser().parse_args(["unregister", "old"])
         cmd_unregister(args)
         assert "Unregistered" in capsys.readouterr().out
+
+    @mock.patch("overlord.cli._call_tool")
+    def test_cmd_messages(self, mock_call, capsys):
+        messages = [{"id": 1, "source_job_id": 3, "consumed": False,
+                     "consumers": ["agent"], "created_at": "2026-01-01"}]
+        mock_call.return_value = json.dumps(messages)
+        args = build_parser().parse_args(["messages", "--job", "my-job", "--unconsumed"])
+        cmd_messages(args)
+        call_args = mock_call.call_args[0][2]
+        assert call_args["source_job_name"] == "my-job"
+        assert call_args["unconsumed"] is True
+        assert "agent" in capsys.readouterr().out
+
+    @mock.patch("overlord.cli._call_tool")
+    def test_cmd_messages_no_filters(self, mock_call, capsys):
+        mock_call.return_value = "[]"
+        args = build_parser().parse_args(["messages"])
+        cmd_messages(args)
+        assert mock_call.call_args[0][2] == {}
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_trigger(self, mock_call, capsys):

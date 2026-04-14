@@ -217,6 +217,58 @@ def create_mcp_server(
         return json.dumps(result)
 
     @mcp.tool()
+    def query_messages(
+        source_job_name: Optional[str] = None,
+        consumer: Optional[str] = None,
+        unconsumed: Optional[bool] = None,
+        limit: int = 20,
+    ) -> str:
+        """Query messages in the message hub with optional filters.
+
+        Parameters
+        ----------
+        source_job_name : str, optional
+            Filter by originating job name.
+        consumer : str, optional
+            Filter by consumer tag.
+        unconsumed : bool, optional
+            If true, return only unconsumed messages. If false, only consumed.
+        limit : int
+            Maximum number of results (default 20).
+
+        Returns
+        -------
+        str
+            JSON array of message objects.
+        """
+        consumed = None
+        if unconsumed is not None:
+            consumed = not unconsumed
+        messages = db.query_messages(
+            source_job_name=source_job_name,
+            consumer=consumer,
+            consumed=consumed,
+            limit=limit,
+        )
+        result = []
+        for msg in messages:
+            payload = msg.payload
+            try:
+                payload = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            result.append({
+                "id": msg.id,
+                "source_job_id": msg.source_job_id,
+                "payload": payload,
+                "consumers": msg.consumers,
+                "consumed": msg.consumed,
+                "created_at": str(msg.created_at) if msg.created_at else None,
+                "consumed_at": str(msg.consumed_at) if msg.consumed_at else None,
+            })
+        return json.dumps(result)
+
+    @mcp.tool()
     async def trigger_job(name: str) -> str:
         """Manually trigger a job to run immediately, ignoring its cron schedule.
 

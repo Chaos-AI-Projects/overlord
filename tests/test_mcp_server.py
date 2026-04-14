@@ -289,3 +289,57 @@ class TestToolsIntegration:
         result = json.loads(tool_map["get_job_status"](name="nope"))
         assert "error" in result
         db.close()
+
+    def test_query_messages_all(self, tools):
+        tool_map, db = tools
+        tool_map["register_job"](name="msg-job", cron_expression="* * * * *", command="echo hi")
+        job = db.get_job_by_name("msg-job")
+        db.create_message(job.id, '{"test": true}', consumers=["agent"])
+        db.create_message(job.id, '{"test": false}', consumers=["logger"])
+        result = json.loads(tool_map["query_messages"]())
+        assert len(result) == 2
+        db.close()
+
+    def test_query_messages_by_job(self, tools):
+        tool_map, db = tools
+        tool_map["register_job"](name="qm-a", cron_expression="* * * * *", command="echo a")
+        tool_map["register_job"](name="qm-b", cron_expression="* * * * *", command="echo b")
+        ja = db.get_job_by_name("qm-a")
+        jb = db.get_job_by_name("qm-b")
+        db.create_message(ja.id, "from-a")
+        db.create_message(jb.id, "from-b")
+        result = json.loads(tool_map["query_messages"](source_job_name="qm-a"))
+        assert len(result) == 1
+        db.close()
+
+    def test_query_messages_by_consumer(self, tools):
+        tool_map, db = tools
+        tool_map["register_job"](name="qm-c", cron_expression="* * * * *", command="echo c")
+        job = db.get_job_by_name("qm-c")
+        db.create_message(job.id, "for-agent", consumers=["agent"])
+        db.create_message(job.id, "for-logger", consumers=["logger"])
+        result = json.loads(tool_map["query_messages"](consumer="agent"))
+        assert len(result) == 1
+        assert result[0]["consumers"] == ["agent"]
+        db.close()
+
+    def test_query_messages_unconsumed(self, tools):
+        tool_map, db = tools
+        tool_map["register_job"](name="qm-d", cron_expression="* * * * *", command="echo d")
+        job = db.get_job_by_name("qm-d")
+        m1 = db.create_message(job.id, "consumed")
+        db.create_message(job.id, "unconsumed")
+        db.mark_consumed(m1.id)
+        result = json.loads(tool_map["query_messages"](unconsumed=True))
+        assert len(result) == 1
+        assert result[0]["consumed"] is False
+        db.close()
+
+    def test_query_messages_parses_payload(self, tools):
+        tool_map, db = tools
+        tool_map["register_job"](name="qm-e", cron_expression="* * * * *", command="echo e")
+        job = db.get_job_by_name("qm-e")
+        db.create_message(job.id, '{"key": "value"}')
+        result = json.loads(tool_map["query_messages"]())
+        assert result[0]["payload"] == {"key": "value"}
+        db.close()

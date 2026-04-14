@@ -206,6 +206,67 @@ class TestLocks:
         assert db.get_lock("stale") is None
 
 
+class TestQueryMessages:
+    def test_query_all(self, db):
+        job = db.create_job(make_job())
+        db.create_message(job.id, "msg1")
+        db.create_message(job.id, "msg2")
+        results = db.query_messages()
+        assert len(results) == 2
+
+    def test_query_by_job_name(self, db):
+        j1 = db.create_job(make_job(name="job-a"))
+        j2 = db.create_job(make_job(name="job-b"))
+        db.create_message(j1.id, "from-a")
+        db.create_message(j2.id, "from-b")
+        results = db.query_messages(source_job_name="job-a")
+        assert len(results) == 1
+        assert results[0].payload == "from-a"
+
+    def test_query_by_consumer(self, db):
+        job = db.create_job(make_job())
+        db.create_message(job.id, "for-agent", consumers=["agent"])
+        db.create_message(job.id, "for-logger", consumers=["logger"])
+        db.create_message(job.id, "for-both", consumers=["agent", "logger"])
+        results = db.query_messages(consumer="agent")
+        assert len(results) == 2
+        payloads = {r.payload for r in results}
+        assert payloads == {"for-agent", "for-both"}
+
+    def test_query_by_consumed(self, db):
+        job = db.create_job(make_job())
+        m1 = db.create_message(job.id, "consumed")
+        db.create_message(job.id, "unconsumed")
+        db.mark_consumed(m1.id)
+        unconsumed = db.query_messages(consumed=False)
+        assert len(unconsumed) == 1
+        assert unconsumed[0].payload == "unconsumed"
+        consumed = db.query_messages(consumed=True)
+        assert len(consumed) == 1
+        assert consumed[0].payload == "consumed"
+
+    def test_query_combined_filters(self, db):
+        j1 = db.create_job(make_job(name="job-x"))
+        j2 = db.create_job(make_job(name="job-y"))
+        db.create_message(j1.id, "match", consumers=["agent"])
+        db.create_message(j1.id, "wrong-consumer", consumers=["logger"])
+        db.create_message(j2.id, "wrong-job", consumers=["agent"])
+        results = db.query_messages(source_job_name="job-x", consumer="agent")
+        assert len(results) == 1
+        assert results[0].payload == "match"
+
+    def test_query_limit(self, db):
+        job = db.create_job(make_job())
+        for i in range(5):
+            db.create_message(job.id, f"msg-{i}")
+        results = db.query_messages(limit=3)
+        assert len(results) == 3
+
+    def test_query_nonexistent_job(self, db):
+        results = db.query_messages(source_job_name="ghost")
+        assert len(results) == 0
+
+
 class TestCascadeDeletes:
     def test_delete_job_cascades_execution(self, db):
         job = db.create_job(make_job())
