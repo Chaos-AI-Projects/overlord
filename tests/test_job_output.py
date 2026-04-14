@@ -6,7 +6,6 @@ import pytest
 
 from overlord.database import Database
 from overlord.executor import run_job
-from overlord.message_hub import _message_to_dict
 from overlord.models import (
     ExecutionStatus,
     Job,
@@ -36,27 +35,35 @@ def make_job(db, **kwargs) -> Job:
 class TestJobOutputParsing:
     """Unit tests for JobOutput.from_stdout()."""
 
-    def test_valid_output_with_consumers(self):
+    def test_valid_output_with_consumer(self):
         stdout = json.dumps({
-            "consumers": ["analytics", "alerts"],
+            "consumer": "analytics",
             "message": {"summary": "build passed"},
         })
         output = JobOutput.from_stdout(stdout)
-        assert output.consumers == ["analytics", "alerts"]
+        assert output.consumer == "analytics"
         assert output.message == {"summary": "build passed"}
 
-    def test_valid_output_with_empty_consumers(self):
+    def test_valid_output_with_null_consumer(self):
         stdout = json.dumps({
-            "consumers": [],
+            "consumer": None,
             "message": "simple text message",
         })
         output = JobOutput.from_stdout(stdout)
-        assert output.consumers == []
+        assert output.consumer is None
         assert output.message == "simple text message"
+
+    def test_valid_output_without_consumer_field(self):
+        stdout = json.dumps({
+            "message": "no consumer specified",
+        })
+        output = JobOutput.from_stdout(stdout)
+        assert output.consumer is None
+        assert output.message == "no consumer specified"
 
     def test_valid_output_with_string_message(self):
         stdout = json.dumps({
-            "consumers": ["handler"],
+            "consumer": "handler",
             "message": "plain string",
         })
         output = JobOutput.from_stdout(stdout)
@@ -64,7 +71,6 @@ class TestJobOutputParsing:
 
     def test_valid_output_with_dict_message(self):
         stdout = json.dumps({
-            "consumers": [],
             "message": {"key": "value", "nested": {"a": 1}},
         })
         output = JobOutput.from_stdout(stdout)
@@ -86,43 +92,32 @@ class TestJobOutputParsing:
         with pytest.raises(JobOutputError, match="must be a JSON object"):
             JobOutput.from_stdout("[1, 2, 3]")
 
-    def test_missing_consumers_field(self):
-        with pytest.raises(JobOutputError, match="consumers"):
-            JobOutput.from_stdout(json.dumps({"message": "hi"}))
-
     def test_missing_message_field(self):
         with pytest.raises(JobOutputError, match="message"):
-            JobOutput.from_stdout(json.dumps({"consumers": []}))
+            JobOutput.from_stdout(json.dumps({"consumer": "x"}))
 
-    def test_consumers_not_a_list(self):
-        with pytest.raises(JobOutputError, match="must be a list"):
+    def test_consumer_not_a_string(self):
+        with pytest.raises(JobOutputError, match="must be a string or null"):
             JobOutput.from_stdout(json.dumps({
-                "consumers": "not-a-list",
-                "message": "hi",
-            }))
-
-    def test_consumers_element_not_string(self):
-        with pytest.raises(JobOutputError, match="must be a string"):
-            JobOutput.from_stdout(json.dumps({
-                "consumers": [123],
+                "consumer": 123,
                 "message": "hi",
             }))
 
     def test_message_invalid_type(self):
         with pytest.raises(JobOutputError, match="must be a string or object"):
             JobOutput.from_stdout(json.dumps({
-                "consumers": [],
+                "consumer": None,
                 "message": [1, 2, 3],
             }))
 
     def test_extra_fields_ignored(self):
         stdout = json.dumps({
-            "consumers": ["x"],
+            "consumer": "x",
             "message": "m",
             "extra": "ignored",
         })
         output = JobOutput.from_stdout(stdout)
-        assert output.consumers == ["x"]
+        assert output.consumer == "x"
         assert output.message == "m"
 
 
@@ -131,29 +126,29 @@ class TestExecutorStructuredOutput:
 
     @pytest.mark.asyncio
     async def test_valid_structured_output_success(self, db):
-        output = json.dumps({"consumers": ["watcher"], "message": "done"})
+        output = json.dumps({"consumer": "watcher", "message": "done"})
         job = make_job(db, command=f"echo '{output}'")
         record = await run_job(job, db)
         assert record.status == ExecutionStatus.SUCCESS
 
         messages = db.poll_messages()
         assert len(messages) == 1
-        assert messages[0].consumers == ["watcher"]
+        assert messages[0].consumer == "watcher"
 
         payload = json.loads(messages[0].payload)
         assert payload["status"] == "success"
         assert payload["message"] == "done"
 
     @pytest.mark.asyncio
-    async def test_empty_consumers_success(self, db):
-        output = json.dumps({"consumers": [], "message": {"key": "val"}})
+    async def test_null_consumer_success(self, db):
+        output = json.dumps({"consumer": None, "message": {"key": "val"}})
         job = make_job(db, command=f"echo '{output}'")
         record = await run_job(job, db)
         assert record.status == ExecutionStatus.SUCCESS
 
         messages = db.poll_messages()
         assert len(messages) == 1
-        assert messages[0].consumers == []
+        assert messages[0].consumer is None
 
     @pytest.mark.asyncio
     async def test_invalid_output_marks_execution_failed(self, db):
@@ -194,62 +189,49 @@ class TestExecutorStructuredOutput:
         assert payload["stdout"] == "raw output\n"
 
     @pytest.mark.asyncio
-    async def test_multi_consumer_stored(self, db):
+    async def test_consumer_stored(self, db):
         output = json.dumps({
-            "consumers": ["a", "b", "c"],
-            "message": "multi",
+            "consumer": "target-job",
+            "message": "routed",
         })
         job = make_job(db, command=f"echo '{output}'")
         await run_job(job, db)
 
         messages = db.poll_messages()
-        assert messages[0].consumers == ["a", "b", "c"]
+        assert messages[0].consumer == "target-job"
 
 
-class TestDatabaseConsumers:
-    """Test the consumers column in the messages table."""
+class TestDatabaseConsumer:
+    """Test the consumer column in the messages table."""
 
-    def test_create_message_with_consumers(self, db):
+    def test_create_message_with_consumer(self, db):
         job = make_job(db)
-        msg = db.create_message(job.id, '{"data": 1}', consumers=["x", "y"])
-        assert msg.consumers == ["x", "y"]
+        msg = db.create_message(job.id, '{"data": 1}', consumer="x")
+        assert msg.consumer == "x"
 
-    def test_create_message_without_consumers(self, db):
+    def test_create_message_without_consumer(self, db):
         job = make_job(db)
         msg = db.create_message(job.id, '{"data": 1}')
-        assert msg.consumers == []
+        assert msg.consumer is None
 
-    def test_poll_returns_consumers(self, db):
+    def test_poll_returns_consumer(self, db):
         job = make_job(db)
-        db.create_message(job.id, '{"data": 1}', consumers=["consumer-a"])
+        db.create_message(job.id, '{"data": 1}', consumer="consumer-a")
 
         messages = db.poll_messages()
         assert len(messages) == 1
-        assert messages[0].consumers == ["consumer-a"]
+        assert messages[0].consumer == "consumer-a"
 
-    def test_consumers_roundtrip(self, db):
+    def test_consumer_roundtrip(self, db):
         job = make_job(db)
-        db.create_message(job.id, "payload", consumers=["alpha", "beta"])
+        db.create_message(job.id, "payload", consumer="alpha")
 
         messages = db.poll_messages()
-        assert messages[0].consumers == ["alpha", "beta"]
+        assert messages[0].consumer == "alpha"
 
-
-class TestMessageHubConsumers:
-    """Test that message_to_dict includes consumers."""
-
-    def test_message_to_dict_includes_consumers(self, db):
+    def test_null_consumer_roundtrip(self, db):
         job = make_job(db)
-        db.create_message(job.id, '{"k": "v"}', consumers=["handler-1"])
+        db.create_message(job.id, "payload")
 
         messages = db.poll_messages()
-        d = _message_to_dict(messages[0])
-        assert d["consumers"] == ["handler-1"]
-
-    def test_message_to_dict_empty_consumers(self, db):
-        job = make_job(db)
-        db.create_message(job.id, '{"k": "v"}')
-
-        messages = db.poll_messages()
-        d = _message_to_dict(messages[0])
-        assert d["consumers"] == []
+        assert messages[0].consumer is None

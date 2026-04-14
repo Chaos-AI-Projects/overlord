@@ -1,5 +1,6 @@
 """Tests for the MCP server — job registry tools."""
 
+import asyncio
 import json
 
 import pytest
@@ -71,8 +72,6 @@ class TestRegisterJob:
         db = Database(db_path=tmp_path / "test.db")
         db.init_schema()
 
-        # Call register_job through the server's tool
-        # Since tools are plain functions captured in closure, we can test via DB
         job = Job(
             name="my-job",
             cron_expression="0 * * * *",
@@ -102,6 +101,7 @@ class TestJobToDict:
         assert d["id"] == 1
         assert d["status"] == "enabled"
         assert d["exclusive_lock"] is None
+        assert d["consumes"] == []
 
     def test_roundtrip_json(self):
         job = Job(
@@ -112,12 +112,14 @@ class TestJobToDict:
             timeout_seconds=300,
             max_retries=2,
             retry_delay_seconds=10,
+            consumes=["job-a", "job-b"],
         )
         text = json.dumps(_job_to_dict(job))
         parsed = json.loads(text)
         assert parsed["name"] == "roundtrip"
         assert parsed["timeout_seconds"] == 300
         assert parsed["max_retries"] == 2
+        assert parsed["consumes"] == ["job-a", "job-b"]
 
 
 class TestExecutionToDict:
@@ -164,8 +166,22 @@ class TestToolsIntegration:
         ))
         assert result["name"] == "cron-job"
         assert result["id"] is not None
+        assert result["consumes"] == []
         # Verify via DB
         assert db.get_job_by_name("cron-job") is not None
+        db.close()
+
+    def test_register_job_with_consumes(self, tools):
+        tool_map, db = tools
+        result = json.loads(tool_map["register_job"](
+            name="consumer-job",
+            cron_expression="*/5 * * * *",
+            command="process.sh",
+            consumes="job-a, job-b",
+        ))
+        assert result["consumes"] == ["job-a", "job-b"]
+        fetched = db.get_job_by_name("consumer-job")
+        assert fetched.consumes == ["job-a", "job-b"]
         db.close()
 
     def test_register_job_with_options(self, tools):
@@ -294,8 +310,8 @@ class TestToolsIntegration:
         tool_map, db = tools
         tool_map["register_job"](name="msg-job", cron_expression="* * * * *", command="echo hi")
         job = db.get_job_by_name("msg-job")
-        db.create_message(job.id, '{"test": true}', consumers=["agent"])
-        db.create_message(job.id, '{"test": false}', consumers=["logger"])
+        db.create_message(job.id, '{"test": true}', consumer="agent")
+        db.create_message(job.id, '{"test": false}', consumer="logger")
         result = json.loads(tool_map["query_messages"]())
         assert len(result) == 2
         assert all(r["source_job_name"] == "msg-job" for r in result)
@@ -318,11 +334,11 @@ class TestToolsIntegration:
         tool_map, db = tools
         tool_map["register_job"](name="qm-c", cron_expression="* * * * *", command="echo c")
         job = db.get_job_by_name("qm-c")
-        db.create_message(job.id, "for-agent", consumers=["agent"])
-        db.create_message(job.id, "for-logger", consumers=["logger"])
+        db.create_message(job.id, "for-agent", consumer="agent")
+        db.create_message(job.id, "for-logger", consumer="logger")
         result = json.loads(tool_map["query_messages"](consumer="agent"))
         assert len(result) == 1
-        assert result[0]["consumers"] == ["agent"]
+        assert result[0]["consumer"] == "agent"
         db.close()
 
     def test_query_messages_unconsumed(self, tools):

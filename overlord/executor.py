@@ -1,7 +1,7 @@
 """Async job executor — runs shell commands as subprocesses.
 
 Handles timeout enforcement, stdout/stderr capture, lock acquisition/release,
-retry logic, and message production for the message hub.
+retry logic, and message production.
 """
 
 import asyncio
@@ -10,7 +10,7 @@ import logging
 from typing import Optional
 
 from .database import Database
-from .models import ExecutionRecord, ExecutionStatus, Job, JobOutput, JobOutputError
+from .models import ExecutionRecord, ExecutionStatus, Job, JobOutput, JobOutputError, Message
 
 logger = logging.getLogger("overlord.executor")
 
@@ -19,6 +19,7 @@ async def run_job(
     job: Job,
     db: Database,
     cancel_event: Optional[asyncio.Event] = None,
+    input_messages: Optional[list[Message]] = None,
 ) -> ExecutionRecord:
     """Execute a job's shell command, respecting locks, timeout, and retries.
 
@@ -27,6 +28,8 @@ async def run_job(
         db: Database handle (thread-local connections are safe here).
         cancel_event: If set, the executor will abort before starting or
             between retries.  Used for graceful shutdown.
+        input_messages: Messages to pass to the job via stdin (for consumer
+            jobs whose ``consumes`` list is non-empty).
 
     Returns:
         The final ExecutionRecord for this run.
@@ -68,7 +71,9 @@ async def run_job(
                     last_record = _reload_record(db, record)
                     break  # lock contention is not retryable
 
-            last_record = await _run_subprocess(job, record, db, cancel_event)
+            last_record = await _run_subprocess(
+                job, record, db, cancel_event, input_messages,
+            )
 
             if last_record.status == ExecutionStatus.SUCCESS:
                 break  # no retry needed
@@ -92,20 +97,38 @@ async def _run_subprocess(
     record: ExecutionRecord,
     db: Database,
     cancel_event: Optional[asyncio.Event],
+    input_messages: Optional[list[Message]] = None,
 ) -> ExecutionRecord:
     """Spawn the shell command and wait for it to finish (or timeout)."""
     logger.info("job=%s execution=%d starting: %s", job.name, record.id, job.command)
 
+    stdin_mode = asyncio.subprocess.PIPE if input_messages else asyncio.subprocess.DEVNULL
+
     proc = await asyncio.create_subprocess_shell(
         job.command,
+        stdin=stdin_mode,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
 
+    stdin_data = None
+    if input_messages:
+        envelope = [
+            {
+                "message_id": m.id,
+                "source_job_id": m.source_job_id,
+                "payload": m.payload,
+                "consumer": m.consumer,
+                "created_at": str(m.created_at) if m.created_at else None,
+            }
+            for m in input_messages
+        ]
+        stdin_data = json.dumps(envelope).encode()
+
     timed_out = False
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(),
+            proc.communicate(input=stdin_data),
             timeout=job.timeout_seconds,  # None means no timeout
         )
     except asyncio.TimeoutError:
@@ -147,10 +170,10 @@ def _reload_record(db: Database, record: ExecutionRecord) -> ExecutionRecord:
 def _produce_message(
     job: Job, record: ExecutionRecord, db: Database,
 ) -> ExecutionRecord:
-    """Create a message from a completed job execution for the message hub.
+    """Create a message from a completed job execution.
 
     For successful executions, stdout is parsed as a structured JobOutput
-    (with ``consumers`` and ``message`` fields).  If parsing fails, the
+    (with ``consumer`` and ``message`` fields).  If parsing fails, the
     execution is retroactively marked as FAILED and the validation error
     is recorded.
 
@@ -193,10 +216,10 @@ def _produce_message(
             "exit_code": record.exit_code,
             "message": output.message,
         })
-        db.create_message(job.id, payload, consumers=output.consumers)
+        db.create_message(job.id, payload, consumer=output.consumer)
         logger.debug(
-            "job=%s execution=%d produced message consumers=%s",
-            job.name, record.id, output.consumers,
+            "job=%s execution=%d produced message consumer=%s",
+            job.name, record.id, output.consumer,
         )
     else:
         payload = json.dumps({

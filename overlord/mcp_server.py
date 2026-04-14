@@ -26,6 +26,7 @@ def _job_to_dict(job: Job) -> dict:
         "timeout_seconds": job.timeout_seconds,
         "max_retries": job.max_retries,
         "retry_delay_seconds": job.retry_delay_seconds,
+        "consumes": job.consumes,
         "created_at": str(job.created_at) if job.created_at else None,
         "updated_at": str(job.updated_at) if job.updated_at else None,
     }
@@ -55,7 +56,7 @@ def _execution_to_dict(rec, db: Optional["Database"] = None) -> dict:
                 payload = json.loads(msg.payload)
                 if payload.get("execution_id") == rec.id and "message" in payload:
                     result["structured_output"] = {
-                        "consumers": msg.consumers,
+                        "consumer": msg.consumer,
                         "message": payload["message"],
                     }
                     break
@@ -107,6 +108,7 @@ def create_mcp_server(
         timeout_seconds: Optional[int] = None,
         max_retries: int = 0,
         retry_delay_seconds: int = 0,
+        consumes: Optional[str] = None,
     ) -> str:
         """Register a new repeatable job.
 
@@ -126,12 +128,20 @@ def create_mcp_server(
             Number of retries on failure (default 0).
         retry_delay_seconds : int
             Delay between retries in seconds (default 0).
+        consumes : str, optional
+            Comma-separated consumer names this job listens to, or ``"*"``
+            for catch-all.  Empty or omitted means the job runs
+            unconditionally on its cron schedule.
 
         Returns
         -------
         str
             JSON object with the created job details.
         """
+        consumes_list: list[str] = []
+        if consumes:
+            consumes_list = [c.strip() for c in consumes.split(",") if c.strip()]
+
         job = Job(
             name=name,
             cron_expression=cron_expression,
@@ -140,6 +150,7 @@ def create_mcp_server(
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             retry_delay_seconds=retry_delay_seconds,
+            consumes=consumes_list,
         )
         try:
             created = db.create_job(job)
@@ -223,7 +234,7 @@ def create_mcp_server(
         unconsumed: Optional[bool] = None,
         limit: int = 20,
     ) -> str:
-        """Query messages in the message hub with optional filters.
+        """Query messages with optional filters.
 
         Parameters
         ----------
@@ -270,7 +281,7 @@ def create_mcp_server(
                 "source_job_id": msg.source_job_id,
                 "source_job_name": job_name,
                 "payload": payload,
-                "consumers": msg.consumers,
+                "consumer": msg.consumer,
                 "consumed": msg.consumed,
                 "created_at": str(msg.created_at) if msg.created_at else None,
                 "consumed_at": str(msg.consumed_at) if msg.consumed_at else None,

@@ -30,7 +30,7 @@ class TestScheduler:
     async def test_tick_launches_due_job(self, scheduler):
         """A job matching the current minute should be launched on tick."""
         # Use '* * * * *' so it always matches.
-        output = json.dumps({"consumers": [], "message": "tick"})
+        output = json.dumps({"consumer": None, "message": "tick"})
         scheduler._db.create_job(Job(
             name="always-due",
             cron_expression="* * * * *",
@@ -107,6 +107,96 @@ class TestScheduler:
         for t in scheduler._running_tasks.values():
             t.cancel()
         await asyncio.gather(*scheduler._running_tasks.values(), return_exceptions=True)
+
+
+class TestSchedulerConsumes:
+    """Test the consumer gate in the scheduler."""
+
+    @pytest.mark.asyncio
+    async def test_consumer_job_skips_without_messages(self, scheduler):
+        """A job with consumes should not run if there are no matching messages."""
+        scheduler._db.create_job(Job(
+            name="consumer",
+            cron_expression="* * * * *",
+            command="echo hello",
+            consumes=["source-job"],
+        ))
+
+        await scheduler._tick()
+        assert len(scheduler._running_tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_consumer_job_runs_with_messages(self, scheduler):
+        """A job with consumes should run when matching messages exist."""
+        output = json.dumps({"consumer": None, "message": "ok"})
+        job = scheduler._db.create_job(Job(
+            name="consumer",
+            cron_expression="* * * * *",
+            command=f"echo '{output}'",
+            consumes=["producer"],
+        ))
+        # Create a message addressed to this consumer.
+        producer = scheduler._db.create_job(Job(
+            name="producer",
+            cron_expression="0 0 1 1 *",
+            command="echo nope",
+        ))
+        scheduler._db.create_message(producer.id, '{"data": 1}', consumer="producer")
+
+        await scheduler._tick()
+        assert len(scheduler._running_tasks) == 1
+
+        # Wait for the task to complete.
+        await asyncio.gather(*scheduler._running_tasks.values())
+
+        # The message should be auto-consumed on success.
+        remaining = scheduler._db.fetch_unconsumed_for_consumers(["producer"])
+        assert len(remaining) == 0
+
+    @pytest.mark.asyncio
+    async def test_catchall_job_runs_with_null_consumer(self, scheduler):
+        """A catch-all job (consumes=['*']) should pick up unaddressed messages."""
+        output = json.dumps({"consumer": None, "message": "ok"})
+        scheduler._db.create_job(Job(
+            name="catchall",
+            cron_expression="* * * * *",
+            command=f"echo '{output}'",
+            consumes=["*"],
+        ))
+        producer = scheduler._db.create_job(Job(
+            name="producer",
+            cron_expression="0 0 1 1 *",
+            command="echo nope",
+        ))
+        # Unaddressed message (consumer=None).
+        input_msg = scheduler._db.create_message(producer.id, '{"data": 1}')
+
+        await scheduler._tick()
+        assert len(scheduler._running_tasks) == 1
+
+        await asyncio.gather(*scheduler._running_tasks.values())
+
+        # The original input message should be consumed.
+        all_msgs = scheduler._db.query_messages()
+        original = [m for m in all_msgs if m.id == input_msg.id]
+        assert len(original) == 1
+        assert original[0].consumed is True
+
+    @pytest.mark.asyncio
+    async def test_unconditional_job_runs_normally(self, scheduler):
+        """A job with empty consumes should run unconditionally."""
+        output = json.dumps({"consumer": None, "message": "ok"})
+        scheduler._db.create_job(Job(
+            name="unconditional",
+            cron_expression="* * * * *",
+            command=f"echo '{output}'",
+            consumes=[],
+        ))
+
+        await scheduler._tick()
+        assert len(scheduler._running_tasks) == 1
+
+        await asyncio.gather(*scheduler._running_tasks.values())
 
 
 class TestSchedulerWithMcp:

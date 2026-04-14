@@ -11,7 +11,7 @@ from overlord.models import ExecutionStatus, Job, JobStatus
 
 
 # Valid structured output for jobs that need to succeed.
-_VALID_OUTPUT = json.dumps({"consumers": [], "message": "ok"})
+_VALID_OUTPUT = json.dumps({"consumer": None, "message": "ok"})
 
 
 @pytest.fixture
@@ -108,3 +108,20 @@ class TestExecutor:
         # Should have stopped early — far fewer than 6 executions.
         history = db.get_execution_history(job.id, limit=10)
         assert len(history) <= 1
+
+    @pytest.mark.asyncio
+    async def test_input_messages_passed_via_stdin(self, db):
+        """Consumer jobs receive input messages on stdin."""
+        from overlord.models import Message
+
+        job = make_job(db, command="cat")
+        msg = db.create_message(job.id, '{"data": "hello"}', consumer="test-job")
+        # Re-read to get created_at.
+        msgs = db.poll_messages()
+
+        record = await run_job(job, db, input_messages=msgs)
+        # cat echoes stdin back — stdout should contain the messages JSON,
+        # but the output won't be valid JobOutput schema so it'll be marked failed.
+        reloaded = db.get_execution(record.id)
+        assert reloaded.stdout is not None
+        assert "hello" in reloaded.stdout

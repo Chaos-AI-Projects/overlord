@@ -20,7 +20,7 @@ DEFAULT_DB_PATH = Path(
     os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
 ) / "overlord" / "overlord.db"
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     timeout_seconds INTEGER,
     max_retries INTEGER NOT NULL DEFAULT 0,
     retry_delay_seconds INTEGER NOT NULL DEFAULT 0,
+    consumes TEXT NOT NULL DEFAULT '[]',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -58,7 +59,7 @@ CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_job_id INTEGER NOT NULL,
     payload TEXT NOT NULL,
-    consumers TEXT NOT NULL DEFAULT '[]',
+    consumer TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     consumed INTEGER NOT NULL DEFAULT 0,
     consumed_at TIMESTAMP,
@@ -77,7 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_execution_history_job_id ON execution_history(job
 CREATE INDEX IF NOT EXISTS idx_execution_history_status ON execution_history(status);
 CREATE INDEX IF NOT EXISTS idx_messages_consumed ON messages(consumed);
 CREATE INDEX IF NOT EXISTS idx_messages_source_job_id ON messages(source_job_id);
-CREATE INDEX IF NOT EXISTS idx_messages_consumers ON messages(consumers);
+CREATE INDEX IF NOT EXISTS idx_messages_consumer ON messages(consumer);
 """
 
 # Migrations from one schema version to the next.
@@ -92,6 +93,17 @@ MIGRATIONS = {
     ],
     4: [
         "CREATE INDEX IF NOT EXISTS idx_messages_consumers ON messages(consumers)",
+    ],
+    5: [
+        # Replace consumers JSON array with single nullable consumer column.
+        "ALTER TABLE messages ADD COLUMN consumer TEXT",
+        # Migrate existing data: pick first element from the JSON array.
+        "UPDATE messages SET consumer = json_extract(consumers, '$[0]') "
+        "WHERE consumers != '[]' AND consumers IS NOT NULL",
+        # Add consumes column to jobs.
+        "ALTER TABLE jobs ADD COLUMN consumes TEXT NOT NULL DEFAULT '[]'",
+        # New index for consumer lookups.
+        "CREATE INDEX IF NOT EXISTS idx_messages_consumer ON messages(consumer)",
     ],
 }
 
@@ -224,13 +236,14 @@ class Database:
     # -- Job CRUD --
 
     def create_job(self, job: Job) -> Job:
+        consumes_json = json.dumps(job.consumes)
         cur = self.conn.execute(
             "INSERT INTO jobs (name, cron_expression, command, status, exclusive_lock, "
-            "timeout_seconds, max_retries, retry_delay_seconds) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "timeout_seconds, max_retries, retry_delay_seconds, consumes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (job.name, job.cron_expression, job.command, job.status.value,
              job.exclusive_lock, job.timeout_seconds, job.max_retries,
-             job.retry_delay_seconds),
+             job.retry_delay_seconds, consumes_json),
         )
         self.conn.commit()
         job.id = cur.lastrowid
@@ -258,13 +271,14 @@ class Database:
         return [self._row_to_job(r) for r in rows]
 
     def update_job(self, job: Job) -> None:
+        consumes_json = json.dumps(job.consumes)
         self.conn.execute(
             "UPDATE jobs SET name=?, cron_expression=?, command=?, status=?, "
             "exclusive_lock=?, timeout_seconds=?, max_retries=?, "
-            "retry_delay_seconds=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            "retry_delay_seconds=?, consumes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (job.name, job.cron_expression, job.command, job.status.value,
              job.exclusive_lock, job.timeout_seconds, job.max_retries,
-             job.retry_delay_seconds, job.id),
+             job.retry_delay_seconds, consumes_json, job.id),
         )
         self.conn.commit()
 
@@ -319,21 +333,19 @@ class Database:
 
     def create_message(
         self, source_job_id: int, payload: str,
-        consumers: Optional[list[str]] = None,
+        consumer: Optional[str] = None,
     ) -> Message:
-        consumers_list = consumers or []
-        consumers_json = json.dumps(consumers_list)
         cur = self.conn.execute(
-            "INSERT INTO messages (source_job_id, payload, consumers) VALUES (?, ?, ?)",
-            (source_job_id, payload, consumers_json),
+            "INSERT INTO messages (source_job_id, payload, consumer) VALUES (?, ?, ?)",
+            (source_job_id, payload, consumer),
         )
         self.conn.commit()
         return Message(
             id=cur.lastrowid, source_job_id=source_job_id,
-            payload=payload, consumers=consumers_list,
+            payload=payload, consumer=consumer,
         )
 
-    def poll_messages(self, limit: int = 10) -> list[Message]:  # Phase 3: poll-based consumption
+    def poll_messages(self, limit: int = 10) -> list[Message]:
         rows = self.conn.execute(
             "SELECT * FROM messages WHERE consumed = 0 "
             "ORDER BY created_at ASC LIMIT ?",
@@ -341,11 +353,23 @@ class Database:
         ).fetchall()
         return [self._row_to_message(r) for r in rows]
 
-    def mark_consumed(self, message_id: int) -> None:  # Phase 3: poll-based consumption
+    def mark_consumed(self, message_id: int) -> None:
         self.conn.execute(
             "UPDATE messages SET consumed = 1, consumed_at = CURRENT_TIMESTAMP "
             "WHERE id = ?",
             (message_id,),
+        )
+        self.conn.commit()
+
+    def mark_consumed_bulk(self, message_ids: list[int]) -> None:
+        """Mark multiple messages as consumed in a single transaction."""
+        if not message_ids:
+            return
+        placeholders = ",".join("?" for _ in message_ids)
+        self.conn.execute(
+            f"UPDATE messages SET consumed = 1, consumed_at = CURRENT_TIMESTAMP "
+            f"WHERE id IN ({placeholders})",
+            message_ids,
         )
         self.conn.commit()
 
@@ -372,7 +396,7 @@ class Database:
         source_job_name : str, optional
             Filter by originating job name.
         consumer : str, optional
-            Filter by consumer tag (searches the JSON consumers array).
+            Filter by consumer tag (exact match on the consumer column).
         consumed : bool, optional
             Filter consumed (True) vs unconsumed (False) messages.
         limit : int
@@ -388,10 +412,7 @@ class Database:
             params.append(source_job_name)
 
         if consumer is not None:
-            # consumers is stored as a JSON array; use json_each for exact matching
-            clauses.append(
-                "EXISTS (SELECT 1 FROM json_each(messages.consumers) WHERE json_each.value = ?)"
-            )
+            clauses.append("consumer = ?")
             params.append(consumer)
 
         if consumed is not None:
@@ -403,6 +424,35 @@ class Database:
         params.append(limit)
 
         rows = self.conn.execute(sql, params).fetchall()
+        return [self._row_to_message(r) for r in rows]
+
+    def fetch_unconsumed_for_consumers(
+        self, consumer_names: list[str], limit: int = 50,
+    ) -> list[Message]:
+        """Fetch unconsumed messages matching consumer names.
+
+        If consumer_names contains ``"*"``, matches messages where
+        ``consumer IS NULL`` (unaddressed messages).  Otherwise matches
+        messages whose ``consumer`` column equals one of the given names.
+        """
+        if not consumer_names:
+            return []
+
+        if "*" in consumer_names:
+            rows = self.conn.execute(
+                "SELECT * FROM messages WHERE consumed = 0 AND consumer IS NULL "
+                "ORDER BY created_at ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            placeholders = ",".join("?" for _ in consumer_names)
+            rows = self.conn.execute(
+                f"SELECT * FROM messages WHERE consumed = 0 "
+                f"AND consumer IN ({placeholders}) "
+                "ORDER BY created_at ASC LIMIT ?",
+                (*consumer_names, limit),
+            ).fetchall()
+
         return [self._row_to_message(r) for r in rows]
 
     # -- Locks --
@@ -451,6 +501,8 @@ class Database:
 
     @staticmethod
     def _row_to_job(row: sqlite3.Row) -> Job:
+        consumes_raw = row["consumes"]
+        consumes = json.loads(consumes_raw) if consumes_raw else []
         return Job(
             id=row["id"],
             name=row["name"],
@@ -461,6 +513,7 @@ class Database:
             timeout_seconds=row["timeout_seconds"],
             max_retries=row["max_retries"],
             retry_delay_seconds=row["retry_delay_seconds"],
+            consumes=consumes,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -480,13 +533,11 @@ class Database:
 
     @staticmethod
     def _row_to_message(row: sqlite3.Row) -> Message:
-        consumers_raw = row["consumers"]
-        consumers = json.loads(consumers_raw) if consumers_raw else []
         return Message(
             id=row["id"],
             source_job_id=row["source_job_id"],
             payload=row["payload"],
-            consumers=consumers,
+            consumer=row["consumer"],
             created_at=row["created_at"],
             consumed=bool(row["consumed"]),
             consumed_at=row["consumed_at"],

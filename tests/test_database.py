@@ -39,6 +39,7 @@ class TestJobCRUD:
         assert fetched.cron_expression == "*/5 * * * *"
         assert fetched.command == "echo hello"
         assert fetched.status == JobStatus.ENABLED
+        assert fetched.consumes == []
 
     def test_get_by_name(self, db):
         db.create_job(make_job())
@@ -89,6 +90,23 @@ class TestJobCRUD:
         job = db.create_job(make_job(exclusive_lock="deploy-lock"))
         fetched = db.get_job(job.id)
         assert fetched.exclusive_lock == "deploy-lock"
+
+    def test_consumes_field(self, db):
+        job = db.create_job(make_job(consumes=["job-a", "job-b"]))
+        fetched = db.get_job(job.id)
+        assert fetched.consumes == ["job-a", "job-b"]
+
+    def test_consumes_default_empty(self, db):
+        job = db.create_job(make_job())
+        fetched = db.get_job(job.id)
+        assert fetched.consumes == []
+
+    def test_update_consumes(self, db):
+        job = db.create_job(make_job())
+        job.consumes = ["*"]
+        db.update_job(job)
+        fetched = db.get_job(job.id)
+        assert fetched.consumes == ["*"]
 
 
 class TestExecutionHistory:
@@ -225,13 +243,11 @@ class TestQueryMessages:
 
     def test_query_by_consumer(self, db):
         job = db.create_job(make_job())
-        db.create_message(job.id, "for-agent", consumers=["agent"])
-        db.create_message(job.id, "for-logger", consumers=["logger"])
-        db.create_message(job.id, "for-both", consumers=["agent", "logger"])
+        db.create_message(job.id, "for-agent", consumer="agent")
+        db.create_message(job.id, "for-logger", consumer="logger")
         results = db.query_messages(consumer="agent")
-        assert len(results) == 2
-        payloads = {r.payload for r in results}
-        assert payloads == {"for-agent", "for-both"}
+        assert len(results) == 1
+        assert results[0].payload == "for-agent"
 
     def test_query_by_consumed(self, db):
         job = db.create_job(make_job())
@@ -248,9 +264,9 @@ class TestQueryMessages:
     def test_query_combined_filters(self, db):
         j1 = db.create_job(make_job(name="job-x"))
         j2 = db.create_job(make_job(name="job-y"))
-        db.create_message(j1.id, "match", consumers=["agent"])
-        db.create_message(j1.id, "wrong-consumer", consumers=["logger"])
-        db.create_message(j2.id, "wrong-job", consumers=["agent"])
+        db.create_message(j1.id, "match", consumer="agent")
+        db.create_message(j1.id, "wrong-consumer", consumer="logger")
+        db.create_message(j2.id, "wrong-job", consumer="agent")
         results = db.query_messages(source_job_name="job-x", consumer="agent")
         assert len(results) == 1
         assert results[0].payload == "match"

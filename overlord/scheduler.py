@@ -7,6 +7,9 @@ enabled jobs are due and dispatches them via the executor.  It handles:
 - Stale lock cleanup on startup
 - Schema version validation on startup
 - Concurrent job execution via asyncio tasks
+- Consumer jobs: jobs with a non-empty ``consumes`` list only run when
+  matching unconsumed messages exist.  Messages are passed to the job
+  via stdin and auto-marked consumed on success.
 """
 
 import asyncio
@@ -20,7 +23,6 @@ from .cron import CronExpression
 from .database import Database
 from .executor import run_job
 from .mcp_server import create_mcp_server
-from .message_hub import MessageHub
 from .models import JobStatus
 
 logger = logging.getLogger("overlord.scheduler")
@@ -39,8 +41,6 @@ class Scheduler:
         self,
         db_path: Optional[Path] = None,
         tick_seconds: int = 60,
-        handler_command: Optional[str] = None,
-        poll_seconds: int = 10,
         mcp_host: Optional[str] = None,
         mcp_port: int = 8000,
     ):
@@ -49,16 +49,8 @@ class Scheduler:
         self._stop_event = asyncio.Event()
         self._cancel_event = asyncio.Event()
         self._running_tasks: dict[int, asyncio.Task] = {}
-        self._message_hub: Optional[MessageHub] = None
-        self._hub_task: Optional[asyncio.Task] = None
         self._mcp_server = None
         self._mcp_task: Optional[asyncio.Task] = None
-        if handler_command is not None:
-            self._message_hub = MessageHub(
-                db=self._db,
-                handler_command=handler_command,
-                poll_seconds=poll_seconds,
-            )
         if mcp_host is not None:
             self._mcp_server = create_mcp_server(
                 db=self._db, host=mcp_host, port=mcp_port,
@@ -74,12 +66,6 @@ class Scheduler:
             logger.info("Released %d stale lock(s) from previous run", released)
 
         self._install_signal_handlers()
-
-        if self._message_hub is not None:
-            self._hub_task = asyncio.create_task(
-                self._message_hub.run(), name="message-hub"
-            )
-            logger.info("Message hub co-started with scheduler")
 
         if self._mcp_server is not None:
             self._mcp_task = asyncio.create_task(
@@ -158,24 +144,44 @@ class Scheduler:
                 logger.debug("job=%s already running, skipping", job.name)
                 continue
 
+            # Consumer gate: if the job has a non-empty consumes list, check
+            # for matching unconsumed messages.  Skip if none exist.
+            input_messages = None
+            if job.consumes:
+                input_messages = self._db.fetch_unconsumed_for_consumers(
+                    job.consumes,
+                )
+                if not input_messages:
+                    logger.debug(
+                        "job=%s consumes=%s but no unconsumed messages, skipping",
+                        job.name, job.consumes,
+                    )
+                    continue
+
             logger.info("job=%s is due, launching", job.name)
             task = asyncio.create_task(
-                run_job(job, self._db, cancel_event=self._cancel_event),
+                self._run_consumer_job(job, input_messages),
                 name=f"job-{job.name}",
             )
             self._running_tasks[job.id] = task
 
+    async def _run_consumer_job(self, job, input_messages) -> None:
+        """Run a job and auto-mark consumed messages on success."""
+        record = await run_job(
+            job, self._db,
+            cancel_event=self._cancel_event,
+            input_messages=input_messages,
+        )
+        # Auto-consume delivered messages when the job succeeds.
+        if input_messages and record.status.value == "success":
+            msg_ids = [m.id for m in input_messages]
+            self._db.mark_consumed_bulk(msg_ids)
+            logger.info(
+                "job=%s auto-consumed %d message(s)", job.name, len(msg_ids),
+            )
+
     async def _shutdown(self) -> None:
         """Wait for running jobs to finish, with a grace period."""
-        # Stop the message hub first.
-        if self._message_hub is not None:
-            await self._message_hub.stop()
-        if self._hub_task is not None and not self._hub_task.done():
-            try:
-                await asyncio.wait_for(self._hub_task, timeout=5)
-            except asyncio.TimeoutError:
-                self._hub_task.cancel()
-
         # Stop the MCP server.
         if self._mcp_task is not None and not self._mcp_task.done():
             self._mcp_task.cancel()

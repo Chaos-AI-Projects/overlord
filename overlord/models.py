@@ -32,6 +32,7 @@ class Job:
     timeout_seconds: Optional[int] = None
     max_retries: int = 0
     retry_delay_seconds: int = 0
+    consumes: list[str] = field(default_factory=list)
     id: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -53,15 +54,15 @@ class ExecutionRecord:
 
 @dataclass
 class Message:
-    """A message produced by a job, consumed via polling.
+    """A message produced by a job, optionally addressed to a single consumer.
 
-    Note: consumed/consumed_at fields are Phase 3 additions (poll-based
-    consumption). Included here so the schema is stable from Phase 1 onward.
+    When ``consumer`` is None the message is unaddressed and can be picked up
+    by a catch-all job (one whose ``consumes`` list contains ``"*"``).
     """
 
     source_job_id: int
     payload: str
-    consumers: list[str] = field(default_factory=list)
+    consumer: Optional[str] = None
     created_at: Optional[datetime] = None
     consumed: bool = False
     consumed_at: Optional[datetime] = None
@@ -80,7 +81,7 @@ class JobOutput:
     If stdout does not match, the execution is marked as failed.
     """
 
-    consumers: list[str]
+    consumer: Optional[str]
     message: Union[str, dict]
 
     @classmethod
@@ -103,21 +104,14 @@ class JobOutput:
                 f"Job stdout must be a JSON object, got {type(data).__name__}"
             )
 
-        if "consumers" not in data:
-            raise JobOutputError("Missing required field: 'consumers'")
         if "message" not in data:
             raise JobOutputError("Missing required field: 'message'")
 
-        consumers = data["consumers"]
-        if not isinstance(consumers, list):
+        consumer = data.get("consumer")
+        if consumer is not None and not isinstance(consumer, str):
             raise JobOutputError(
-                f"'consumers' must be a list, got {type(consumers).__name__}"
+                f"'consumer' must be a string or null, got {type(consumer).__name__}"
             )
-        for i, c in enumerate(consumers):
-            if not isinstance(c, str):
-                raise JobOutputError(
-                    f"'consumers[{i}]' must be a string, got {type(c).__name__}"
-                )
 
         message = data["message"]
         if not isinstance(message, (str, dict)):
@@ -125,7 +119,7 @@ class JobOutput:
                 f"'message' must be a string or object, got {type(message).__name__}"
             )
 
-        return cls(consumers=consumers, message=message)
+        return cls(consumer=consumer, message=message)
 
 
 @dataclass

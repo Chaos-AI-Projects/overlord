@@ -79,6 +79,14 @@ class TestBuildParser:
         assert args.lock == "bk"
         assert args.timeout == 600
 
+    def test_register_with_consumes(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "register", "--name", "consumer", "--cron", "*/5 * * * *",
+            "--command", "process.sh", "--consumes", "job-a,job-b",
+        ])
+        assert args.consumes == "job-a,job-b"
+
     def test_unregister_command(self):
         parser = build_parser()
         args = parser.parse_args(["unregister", "old-job"])
@@ -126,14 +134,17 @@ class TestPrintJobTable:
 
     def test_normal_output(self, capsys):
         jobs = [
-            {"id": 1, "name": "backup", "cron_expression": "0 2 * * *", "status": "enabled"},
-            {"id": 2, "name": "cleanup", "cron_expression": "0 0 * * 0", "status": "disabled"},
+            {"id": 1, "name": "backup", "cron_expression": "0 2 * * *",
+             "status": "enabled", "consumes": []},
+            {"id": 2, "name": "cleanup", "cron_expression": "0 0 * * 0",
+             "status": "disabled", "consumes": ["job-a"]},
         ]
         _print_job_table(json.dumps(jobs))
         out = capsys.readouterr().out
         assert "backup" in out
         assert "cleanup" in out
         assert "ID" in out
+        assert "CONSUMES" in out
 
     def test_error_response(self, capsys):
         with pytest.raises(SystemExit):
@@ -149,6 +160,7 @@ class TestPrintJobStatus:
             "status": "enabled",
             "cron_expression": "* * * * *",
             "command": "echo hello",
+            "consumes": [],
             "exclusive_lock": None,
             "timeout_seconds": None,
             "max_retries": 0,
@@ -169,6 +181,7 @@ class TestPrintJobStatus:
             "status": "enabled",
             "cron_expression": "* * * * *",
             "command": "echo hello",
+            "consumes": ["source-a"],
             "exclusive_lock": "lk",
             "timeout_seconds": 60,
             "max_retries": 2,
@@ -185,6 +198,8 @@ class TestPrintJobStatus:
         assert "Lock:" in out
         assert "Timeout:" in out
         assert "Retries:" in out
+        assert "Consumes:" in out
+        assert "source-a" in out
         assert "success" in out
 
 
@@ -196,16 +211,16 @@ class TestPrintMessages:
     def test_normal_output(self, capsys):
         messages = [
             {"id": 1, "source_job_id": 5, "source_job_name": "my-job", "consumed": False,
-             "consumers": ["agent", "logger"], "created_at": "2026-01-01 00:00:00"},
+             "consumer": "agent", "created_at": "2026-01-01 00:00:00"},
             {"id": 2, "source_job_id": 5, "source_job_name": "my-job", "consumed": True,
-             "consumers": [], "created_at": "2026-01-01 00:01:00"},
+             "consumer": None, "created_at": "2026-01-01 00:01:00"},
         ]
         _print_messages(json.dumps(messages))
         out = capsys.readouterr().out
         assert "ID" in out
         assert "JOB" in out
         assert "my-job" in out
-        assert "agent, logger" in out
+        assert "agent" in out
         assert "yes" in out
         assert "no" in out
 
@@ -223,7 +238,8 @@ class TestCommandHandlers:
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_list(self, mock_call, capsys):
-        jobs = [{"id": 1, "name": "j1", "cron_expression": "* * * * *", "status": "enabled"}]
+        jobs = [{"id": 1, "name": "j1", "cron_expression": "* * * * *",
+                 "status": "enabled", "consumes": []}]
         mock_call.return_value = json.dumps(jobs)
         args = build_parser().parse_args(["list"])
         cmd_list(args)
@@ -243,6 +259,7 @@ class TestCommandHandlers:
         data = {
             "name": "j1", "id": 1, "status": "enabled",
             "cron_expression": "* * * * *", "command": "echo hi",
+            "consumes": [],
             "exclusive_lock": None, "timeout_seconds": None,
             "max_retries": 0, "retry_delay_seconds": 0,
             "created_at": "2026-01-01", "updated_at": "2026-01-01",
@@ -267,6 +284,17 @@ class TestCommandHandlers:
         assert "Registered" in capsys.readouterr().out
 
     @mock.patch("overlord.cli._call_tool")
+    def test_cmd_register_with_consumes(self, mock_call, capsys):
+        mock_call.return_value = json.dumps({"name": "consumer-job", "id": 6})
+        args = build_parser().parse_args([
+            "register", "--name", "consumer-job", "--cron", "*/5 * * * *",
+            "--command", "process.sh", "--consumes", "job-a,job-b",
+        ])
+        cmd_register(args)
+        call_args = mock_call.call_args[0][2]
+        assert call_args["consumes"] == "job-a,job-b"
+
+    @mock.patch("overlord.cli._call_tool")
     def test_cmd_register_error(self, mock_call, capsys):
         mock_call.return_value = json.dumps({"error": "Job 'dup' already exists"})
         args = build_parser().parse_args([
@@ -286,7 +314,7 @@ class TestCommandHandlers:
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_messages(self, mock_call, capsys):
         messages = [{"id": 1, "source_job_id": 3, "consumed": False,
-                     "consumers": ["agent"], "created_at": "2026-01-01"}]
+                     "consumer": "agent", "created_at": "2026-01-01"}]
         mock_call.return_value = json.dumps(messages)
         args = build_parser().parse_args(["messages", "--job", "my-job", "--unconsumed"])
         cmd_messages(args)

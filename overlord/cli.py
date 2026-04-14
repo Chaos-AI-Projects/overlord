@@ -66,16 +66,16 @@ def _print_messages(raw: str) -> None:
         return
 
     fmt = "{:<6} {:<20} {:<10} {:<25} {:<30}"
-    print(fmt.format("ID", "JOB", "CONSUMED", "CONSUMERS", "CREATED"))
+    print(fmt.format("ID", "JOB", "CONSUMED", "CONSUMER", "CREATED"))
     print("-" * 93)
     for m in messages:
-        consumers = ", ".join(m.get("consumers", []))
+        consumer = m.get("consumer") or ""
         job_label = m.get("source_job_name") or str(m.get("source_job_id", ""))
         print(fmt.format(
             m.get("id", ""),
             job_label[:20],
             "yes" if m.get("consumed") else "no",
-            consumers[:25],
+            consumer[:25],
             str(m.get("created_at", ""))[:30],
         ))
 
@@ -97,15 +97,17 @@ def _print_job_table(raw: str) -> None:
         return
 
     # Table header
-    fmt = "{:<5} {:<25} {:<20} {:<10}"
-    print(fmt.format("ID", "NAME", "CRON", "STATUS"))
-    print("-" * 62)
+    fmt = "{:<5} {:<25} {:<20} {:<10} {:<20}"
+    print(fmt.format("ID", "NAME", "CRON", "STATUS", "CONSUMES"))
+    print("-" * 82)
     for j in jobs:
+        consumes = ", ".join(j.get("consumes", []))
         print(fmt.format(
             j.get("id", ""),
             j.get("name", "")[:25],
             j.get("cron_expression", "")[:20],
             j.get("status", ""),
+            consumes[:20] if consumes else "-",
         ))
 
 
@@ -121,19 +123,22 @@ def _print_job_status(raw: str) -> None:
         print(f"Error: {data['error']}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Job:     {data.get('name')}")
-    print(f"ID:      {data.get('id')}")
-    print(f"Status:  {data.get('status')}")
-    print(f"Cron:    {data.get('cron_expression')}")
-    print(f"Command: {data.get('command')}")
+    print(f"Job:      {data.get('name')}")
+    print(f"ID:       {data.get('id')}")
+    print(f"Status:   {data.get('status')}")
+    print(f"Cron:     {data.get('cron_expression')}")
+    print(f"Command:  {data.get('command')}")
+    consumes = data.get("consumes", [])
+    if consumes:
+        print(f"Consumes: {', '.join(consumes)}")
     if data.get("exclusive_lock"):
-        print(f"Lock:    {data['exclusive_lock']}")
+        print(f"Lock:     {data['exclusive_lock']}")
     if data.get("timeout_seconds"):
-        print(f"Timeout: {data['timeout_seconds']}s")
+        print(f"Timeout:  {data['timeout_seconds']}s")
     if data.get("max_retries"):
-        print(f"Retries: {data['max_retries']} (delay {data.get('retry_delay_seconds', 0)}s)")
-    print(f"Created: {data.get('created_at')}")
-    print(f"Updated: {data.get('updated_at')}")
+        print(f"Retries:  {data['max_retries']} (delay {data.get('retry_delay_seconds', 0)}s)")
+    print(f"Created:  {data.get('created_at')}")
+    print(f"Updated:  {data.get('updated_at')}")
 
     execs = data.get("recent_executions", [])
     if execs:
@@ -166,8 +171,6 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     scheduler = Scheduler(
         db_path=Path(args.db) if args.db else None,
         tick_seconds=args.tick,
-        handler_command=args.handler,
-        poll_seconds=args.poll_seconds,
         mcp_host=args.mcp_host,
         mcp_port=args.mcp_port,
     )
@@ -204,6 +207,8 @@ def cmd_register(args: argparse.Namespace) -> None:
         arguments["max_retries"] = args.retries
     if args.retry_delay is not None:
         arguments["retry_delay_seconds"] = args.retry_delay
+    if args.consumes:
+        arguments["consumes"] = args.consumes
 
     raw = asyncio.run(_call_tool(args.mcp_url, "register_job", arguments))
     data = json.loads(raw)
@@ -234,7 +239,7 @@ def cmd_trigger(args: argparse.Namespace) -> None:
 
 
 def cmd_messages(args: argparse.Namespace) -> None:
-    """Query messages in the message hub."""
+    """Query messages."""
     arguments: dict = {}
     if args.job:
         arguments["source_job_name"] = args.job
@@ -263,8 +268,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_daemon = sub.add_parser("daemon", help="Start the scheduler daemon")
     p_daemon.add_argument("--db", metavar="PATH", help="Path to SQLite database")
     p_daemon.add_argument("--tick", type=int, default=60, help="Tick interval in seconds (default: 60)")
-    p_daemon.add_argument("--handler", metavar="CMD", help="Message handler command")
-    p_daemon.add_argument("--poll-seconds", type=int, default=10, help="Message poll interval (default: 10)")
     p_daemon.add_argument("--mcp-host", default="127.0.0.1", help="MCP bind address (default: 127.0.0.1)")
     p_daemon.add_argument("--mcp-port", type=int, default=8000, help="MCP port (default: 8000)")
     p_daemon.set_defaults(func=cmd_daemon)
@@ -290,6 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--timeout", type=int, metavar="SEC", help="Timeout in seconds")
     p_reg.add_argument("--retries", type=int, metavar="N", help="Max retries")
     p_reg.add_argument("--retry-delay", type=int, metavar="SEC", help="Delay between retries in seconds")
+    p_reg.add_argument("--consumes", metavar="NAMES", help="Comma-separated consumer names or '*' for catch-all")
     p_reg.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
     p_reg.set_defaults(func=cmd_register)
 
@@ -306,7 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_trig.set_defaults(func=cmd_trigger)
 
     # messages
-    p_msg = sub.add_parser("messages", help="Query messages in the message hub")
+    p_msg = sub.add_parser("messages", help="Query messages")
     p_msg.add_argument("--job", metavar="NAME", help="Filter by source job name")
     p_msg.add_argument("--consumer", metavar="NAME", help="Filter by consumer tag")
     p_msg.add_argument("--unconsumed", action="store_true", help="Show only unconsumed messages")
