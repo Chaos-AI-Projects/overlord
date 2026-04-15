@@ -100,6 +100,9 @@ MIGRATIONS = {
         # Migrate existing data: pick first element from the JSON array.
         "UPDATE messages SET consumer = json_extract(consumers, '$[0]') "
         "WHERE consumers != '[]' AND consumers IS NOT NULL",
+        # Drop the old consumers column and its index (SQLite >= 3.35.0).
+        "DROP INDEX IF EXISTS idx_messages_consumers",
+        "ALTER TABLE messages DROP COLUMN consumers",
         # Add consumes column to jobs.
         "ALTER TABLE jobs ADD COLUMN consumes TEXT NOT NULL DEFAULT '[]'",
         # New index for consumer lookups.
