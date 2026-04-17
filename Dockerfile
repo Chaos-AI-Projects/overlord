@@ -32,6 +32,7 @@ RUN pip install --break-system-packages -e .
 # Database lives on a runtime-attached volume
 ENV XDG_DATA_HOME=/data
 VOLUME /data
+VOLUME /vault
 
 # MCP HTTP server default port
 EXPOSE 8000
