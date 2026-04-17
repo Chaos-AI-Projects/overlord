@@ -6,6 +6,7 @@ WAL-mode contention.
 
 Usage::
 
+    overlord init [PATH]
     overlord daemon [--db PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT]
     overlord list [--status STATUS] [--mcp-url URL]
     overlord status JOB_NAME [--mcp-url URL]
@@ -17,11 +18,16 @@ Usage::
 import argparse
 import asyncio
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
 
 DEFAULT_MCP_URL = "http://127.0.0.1:8000/mcp/"
+
+# Path to the bundled wrapper script (relative to this file).
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+_OVERLORD_JOB_SCRIPT = _SCRIPTS_DIR / "overlord_job.sh"
 
 
 async def _call_tool(mcp_url: str, tool_name: str, arguments: dict) -> str:
@@ -161,6 +167,59 @@ def _print_job_status(raw: str) -> None:
 # -- Subcommand handlers --
 
 
+def cmd_init(args: argparse.Namespace) -> None:
+    """Scaffold a vault directory, initialize the DB, and register the overlord job."""
+    from .database import Database
+    from .models import Job
+    from .vault_template import VAULT_CLAUDE_MD
+
+    vault = Path(args.path).resolve()
+    vault.mkdir(parents=True, exist_ok=True)
+
+    # Write CLAUDE.md
+    claude_md = vault / "CLAUDE.md"
+    if claude_md.exists():
+        print(f"CLAUDE.md already exists at {claude_md}, skipping")
+    else:
+        claude_md.write_text(VAULT_CLAUDE_MD)
+        print(f"Created {claude_md}")
+
+    # Copy wrapper script into the vault
+    dest_script = vault / "overlord_job.sh"
+    if dest_script.exists():
+        print(f"overlord_job.sh already exists at {dest_script}, skipping")
+    else:
+        shutil.copy2(_OVERLORD_JOB_SCRIPT, dest_script)
+        dest_script.chmod(0o755)
+        print(f"Copied wrapper script to {dest_script}")
+
+    # Initialize database directly (no daemon needed)
+    db_path = vault / "overlord.db"
+    db = Database(db_path)
+    db.init_schema()
+    print(f"Initialized database at {db_path}")
+
+    # Register the overlord job (direct DB write, bypassing MCP)
+    existing = db.get_job_by_name("overlord")
+    if existing:
+        print(f"Job 'overlord' already registered (id={existing.id}), skipping")
+    else:
+        job = Job(
+            name="overlord",
+            cron_expression="*/5 * * * *",
+            command=str(dest_script),
+            consumes=["overlord"],
+            timeout_seconds=300,
+        )
+        created = db.create_job(job)
+        print(f"Registered job 'overlord' (id={created.id})")
+
+    db.close()
+
+    print(f"\nVault initialized at {vault}")
+    print(f"Start the daemon with: cd {vault} && overlord daemon --db {db_path}")
+
+
 def cmd_daemon(args: argparse.Namespace) -> None:
     """Start the scheduler daemon."""
     from .logging_config import setup_logging
@@ -263,6 +322,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Overlord — repeatable tasks manager CLI",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    # init
+    p_init = sub.add_parser("init", help="Scaffold a vault directory with DB and overlord job")
+    p_init.add_argument("path", nargs="?", default=".", help="Vault directory path (default: current directory)")
+    p_init.set_defaults(func=cmd_init)
 
     # daemon
     p_daemon = sub.add_parser("daemon", help="Start the scheduler daemon")
