@@ -49,11 +49,13 @@ class Scheduler:
         self._stop_event = asyncio.Event()
         self._cancel_event = asyncio.Event()
         self._running_tasks: dict[int, asyncio.Task] = {}
+        self._cwd = Path.cwd()
         self._mcp_server = None
         self._mcp_task: Optional[asyncio.Task] = None
         if mcp_host is not None:
             self._mcp_server = create_mcp_server(
                 db=self._db, host=mcp_host, port=mcp_port,
+                cwd=self._cwd,
             )
 
     async def run(self) -> None:
@@ -171,6 +173,7 @@ class Scheduler:
             job, self._db,
             cancel_event=self._cancel_event,
             input_messages=input_messages,
+            cwd=self._cwd,
         )
         # Auto-consume delivered messages when the job succeeds.
         if input_messages and record.status.value == "success":

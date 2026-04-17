@@ -110,6 +110,18 @@ class TestExecutor:
         assert len(history) <= 1
 
     @pytest.mark.asyncio
+    async def test_cwd_passed_to_subprocess(self, db, tmp_path):
+        """Jobs run in the specified working directory."""
+        from pathlib import Path
+
+        target_dir = tmp_path / "workdir"
+        target_dir.mkdir()
+        job = make_job(db, command=f"echo '{{\"consumer\": null, \"message\": \"'$(pwd)'\"}}' ")
+        record = await run_job(job, db, cwd=target_dir)
+        assert record.status == ExecutionStatus.SUCCESS
+        assert str(target_dir) in record.stdout
+
+    @pytest.mark.asyncio
     async def test_input_messages_passed_via_stdin(self, db):
         """Consumer jobs receive input messages on stdin."""
         from overlord.models import Message

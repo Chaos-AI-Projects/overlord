@@ -7,6 +7,7 @@ retry logic, and message production.
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Optional
 
 from .database import Database
@@ -20,6 +21,7 @@ async def run_job(
     db: Database,
     cancel_event: Optional[asyncio.Event] = None,
     input_messages: Optional[list[Message]] = None,
+    cwd: Optional[Path] = None,
 ) -> ExecutionRecord:
     """Execute a job's shell command, respecting locks, timeout, and retries.
 
@@ -72,7 +74,7 @@ async def run_job(
                     break  # lock contention is not retryable
 
             last_record = await _run_subprocess(
-                job, record, db, cancel_event, input_messages,
+                job, record, db, cancel_event, input_messages, cwd=cwd,
             )
 
             if last_record.status == ExecutionStatus.SUCCESS:
@@ -98,6 +100,7 @@ async def _run_subprocess(
     db: Database,
     cancel_event: Optional[asyncio.Event],
     input_messages: Optional[list[Message]] = None,
+    cwd: Optional[Path] = None,
 ) -> ExecutionRecord:
     """Spawn the shell command and wait for it to finish (or timeout)."""
     logger.info("job=%s execution=%d starting: %s", job.name, record.id, job.command)
@@ -109,6 +112,7 @@ async def _run_subprocess(
         stdin=stdin_mode,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
     )
 
     stdin_data = None

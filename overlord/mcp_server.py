@@ -70,6 +70,7 @@ def create_mcp_server(
     db: Optional["Database"] = None,
     host: str = "127.0.0.1",
     port: int = 8000,
+    cwd: Optional[Path] = None,
 ):
     """Create and return a FastMCP server wired to the given database.
 
@@ -311,7 +312,7 @@ def create_mcp_server(
 
         async def _run() -> None:
             try:
-                await run_job(job, db)
+                await run_job(job, db, cwd=cwd)
             except Exception:
                 logger.exception("trigger_job: background execution failed for %r", name)
 
