@@ -52,6 +52,7 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 RUN chown -R overlord:overlord /app
-USER overlord
 
+# Entrypoint runs as root to detect volume UID and adjust overlord user,
+# then drops privileges to run the daemon as overlord
 ENTRYPOINT ["/entrypoint.sh"]
