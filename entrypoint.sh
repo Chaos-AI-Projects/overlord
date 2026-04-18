@@ -16,7 +16,8 @@ fi
 cd /home/overlord
 
 # Initialize the database schema on the mounted volume
-su -s /bin/bash overlord -c "overlord init"
+# Note: su resets the environment, so we must pass XDG_DATA_HOME explicitly
+su -s /bin/bash overlord -c "XDG_DATA_HOME=/data overlord init"
 
 # Start the scheduler daemon as overlord
-exec su -s /bin/bash overlord -c "exec overlord daemon $*"
+exec su -s /bin/bash overlord -c "XDG_DATA_HOME=/data exec overlord daemon $*"
