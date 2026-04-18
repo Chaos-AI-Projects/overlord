@@ -13,6 +13,7 @@ Usage::
     overlord register --name NAME --cron EXPR --command CMD [options] [--mcp-url URL]
     overlord unregister JOB_NAME [--mcp-url URL]
     overlord trigger JOB_NAME [--mcp-url URL]
+    overlord send [--consumer NAME] [--payload TEXT] [--mcp-url URL]
 """
 
 import argparse
@@ -76,7 +77,7 @@ def _print_messages(raw: str) -> None:
     print("-" * 93)
     for m in messages:
         consumer = m.get("consumer") or ""
-        job_label = m.get("source_job_name") or str(m.get("source_job_id", ""))
+        job_label = m.get("source_job_name") or ("(cli)" if m.get("source_job_id") is None else str(m.get("source_job_id", "")))
         print(fmt.format(
             m.get("id", ""),
             job_label[:20],
@@ -297,6 +298,33 @@ def cmd_trigger(args: argparse.Namespace) -> None:
     print(f"Triggered job '{data['job']['name']}' — use 'overlord status {args.name}' to check progress")
 
 
+def cmd_send(args: argparse.Namespace) -> None:
+    """Send a message into the hub."""
+    payload = args.payload
+    if payload is None:
+        if sys.stdin.isatty():
+            print("Error: --payload not provided and stdin is a terminal. "
+                  "Provide --payload or pipe data via stdin.", file=sys.stderr)
+            sys.exit(1)
+        payload = sys.stdin.read()
+
+    arguments: dict = {"payload": payload}
+    if args.consumer:
+        arguments["consumer"] = args.consumer
+
+    raw = asyncio.run(_call_tool(args.mcp_url, "send_message", arguments))
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        print(raw)
+        return
+    if "error" in data:
+        print(f"Error: {data['error']}", file=sys.stderr)
+        sys.exit(1)
+    consumer_info = f" → {data.get('consumer')}" if data.get("consumer") else ""
+    print(f"Message sent (id={data['id']}{consumer_info})")
+
+
 def cmd_messages(args: argparse.Namespace) -> None:
     """Query messages."""
     arguments: dict = {}
@@ -372,6 +400,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_trig.add_argument("name", help="Job name")
     p_trig.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
     p_trig.set_defaults(func=cmd_trigger)
+
+    # send
+    p_send = sub.add_parser("send", help="Send a message into the hub")
+    p_send.add_argument("--consumer", metavar="NAME", help="Consumer name the message is addressed to")
+    p_send.add_argument("--payload", metavar="TEXT", help="Message payload (reads stdin if omitted)")
+    p_send.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
+    p_send.set_defaults(func=cmd_send)
 
     # messages
     p_msg = sub.add_parser("messages", help="Query messages")

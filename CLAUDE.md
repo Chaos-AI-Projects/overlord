@@ -19,6 +19,7 @@ overlord status JOB_NAME [--mcp-url URL]
 overlord register --name NAME --cron EXPR --command CMD [options] [--mcp-url URL]
 overlord unregister JOB_NAME [--mcp-url URL]
 overlord trigger JOB_NAME [--mcp-url URL]
+overlord send [--consumer NAME] [--payload TEXT] [--mcp-url URL]
 
 # Run tests
 pytest overlord/tests -v

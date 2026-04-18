@@ -361,3 +361,46 @@ class TestToolsIntegration:
         result = json.loads(tool_map["query_messages"]())
         assert result[0]["payload"] == {"key": "value"}
         db.close()
+
+    def test_send_message_with_consumer(self, tools):
+        tool_map, db = tools
+        result = json.loads(tool_map["send_message"](
+            payload='{"action": "run"}',
+            consumer="overlord",
+        ))
+        assert result["id"] is not None
+        assert result["source_job_id"] is None
+        assert result["consumer"] == "overlord"
+        # Verify in DB
+        msgs = db.query_messages(consumer="overlord")
+        assert len(msgs) == 1
+        assert msgs[0].source_job_id is None
+        db.close()
+
+    def test_send_message_without_consumer(self, tools):
+        tool_map, db = tools
+        result = json.loads(tool_map["send_message"](payload="hello"))
+        assert result["id"] is not None
+        assert result["consumer"] is None
+        assert result["source_job_id"] is None
+        db.close()
+
+    def test_send_message_picked_up_by_consumer_job(self, tools):
+        tool_map, db = tools
+        # Send a message addressed to "overlord"
+        tool_map["send_message"](payload="kick", consumer="overlord")
+        # Verify it appears in unconsumed messages for "overlord" consumer
+        msgs = db.fetch_unconsumed_for_consumers(["overlord"])
+        assert len(msgs) == 1
+        assert msgs[0].payload == "kick"
+        assert msgs[0].source_job_id is None
+        db.close()
+
+    def test_query_messages_shows_cli_messages(self, tools):
+        tool_map, db = tools
+        tool_map["send_message"](payload="cli-msg", consumer="test")
+        result = json.loads(tool_map["query_messages"]())
+        assert len(result) == 1
+        assert result[0]["source_job_id"] is None
+        assert result[0]["source_job_name"] is None
+        db.close()

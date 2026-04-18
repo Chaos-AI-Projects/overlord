@@ -272,11 +272,13 @@ def create_mcp_server(
             except (json.JSONDecodeError, TypeError):
                 pass
             # Resolve source job name
-            job_name = job_name_cache.get(msg.source_job_id)
-            if job_name is None:
-                job = db.get_job(msg.source_job_id)
-                job_name = job.name if job else None
-                job_name_cache[msg.source_job_id] = job_name
+            job_name = None
+            if msg.source_job_id is not None:
+                job_name = job_name_cache.get(msg.source_job_id)
+                if job_name is None:
+                    job = db.get_job(msg.source_job_id)
+                    job_name = job.name if job else None
+                    job_name_cache[msg.source_job_id] = job_name
             result.append({
                 "id": msg.id,
                 "source_job_id": msg.source_job_id,
@@ -288,6 +290,41 @@ def create_mcp_server(
                 "consumed_at": str(msg.consumed_at) if msg.consumed_at else None,
             })
         return json.dumps(result)
+
+    @mcp.tool()
+    def send_message(
+        payload: str,
+        consumer: Optional[str] = None,
+    ) -> str:
+        """Send a message directly into the hub without a source job.
+
+        Parameters
+        ----------
+        payload : str
+            Message payload (string or JSON).
+        consumer : str, optional
+            Consumer name the message is addressed to.  Omit for
+            unaddressed messages picked up by catch-all jobs.
+
+        Returns
+        -------
+        str
+            JSON object with the created message details.
+        """
+        msg = db.create_message(
+            source_job_id=None,
+            payload=payload,
+            consumer=consumer,
+        )
+        logger.info("CLI message created (id=%s, consumer=%r)", msg.id, consumer)
+        return json.dumps({
+            "id": msg.id,
+            "source_job_id": msg.source_job_id,
+            "payload": payload,
+            "consumer": msg.consumer,
+            "consumed": msg.consumed,
+            "created_at": str(msg.created_at) if msg.created_at else None,
+        })
 
     @mcp.tool()
     async def trigger_job(name: str) -> str:

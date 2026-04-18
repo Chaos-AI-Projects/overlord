@@ -20,7 +20,7 @@ DEFAULT_DB_PATH = Path(
     os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
 ) / "overlord" / "overlord.db"
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS execution_history (
 
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_job_id INTEGER NOT NULL,
+    source_job_id INTEGER,
     payload TEXT NOT NULL,
     consumer TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -106,6 +106,26 @@ MIGRATIONS = {
         # Add consumes column to jobs.
         "ALTER TABLE jobs ADD COLUMN consumes TEXT NOT NULL DEFAULT '[]'",
         # New index for consumer lookups.
+        "CREATE INDEX IF NOT EXISTS idx_messages_consumer ON messages(consumer)",
+    ],
+    6: [
+        # Make source_job_id nullable so CLI-injected messages have no source job.
+        # SQLite doesn't support ALTER COLUMN, so recreate the table.
+        """CREATE TABLE messages_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_job_id INTEGER,
+            payload TEXT NOT NULL,
+            consumer TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            consumed INTEGER NOT NULL DEFAULT 0,
+            consumed_at TIMESTAMP,
+            FOREIGN KEY (source_job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        )""",
+        "INSERT INTO messages_new SELECT * FROM messages",
+        "DROP TABLE messages",
+        "ALTER TABLE messages_new RENAME TO messages",
+        "CREATE INDEX IF NOT EXISTS idx_messages_consumed ON messages(consumed)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_source_job_id ON messages(source_job_id)",
         "CREATE INDEX IF NOT EXISTS idx_messages_consumer ON messages(consumer)",
     ],
 }
@@ -335,7 +355,7 @@ class Database:
     # -- Messages --
 
     def create_message(
-        self, source_job_id: int, payload: str,
+        self, source_job_id: Optional[int], payload: str,
         consumer: Optional[str] = None,
     ) -> Message:
         cur = self.conn.execute(

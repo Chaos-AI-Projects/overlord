@@ -60,7 +60,7 @@ class Message:
     by a catch-all job (one whose ``consumes`` list contains ``"*"``).
     """
 
-    source_job_id: int
+    source_job_id: Optional[int]
     payload: str
     consumer: Optional[str] = None
     created_at: Optional[datetime] = None
