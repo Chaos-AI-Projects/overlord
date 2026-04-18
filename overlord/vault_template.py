@@ -79,6 +79,6 @@ when matching unconsumed messages exist. Messages are passed to the job as a JSO
 - Keep job names short and descriptive (e.g., `github-fetcher`, `daily-report`).
 - Set reasonable timeouts for jobs that invoke external services.
 - Use `--lock` when a job must not run concurrently with itself.
-- When creating jobs that invoke `claude`, use `claude -p --output-format text` for non-interactive mode.
+- When creating jobs that invoke `claude`, use `claude -p --output-format text --dangerously-skip-permissions` for non-interactive mode.
 - Wrap complex job logic in shell scripts placed in this vault directory.
 """

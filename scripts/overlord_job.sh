@@ -35,7 +35,7 @@ fi
 # Invoke Claude Code in print mode.  The working directory should be
 # the vault (set by the daemon's cwd), so Claude picks up the vault's
 # CLAUDE.md automatically.
-RESPONSE="$(echo "$PROMPT" | claude -p --output-format text 2>/dev/null)" || {
+RESPONSE="$(echo "$PROMPT" | claude -p --output-format text --dangerously-skip-permissions 2>/dev/null)" || {
     # If claude fails, still emit valid JSON.
     echo '{"consumer": null, "message": "Claude invocation failed."}'
     exit 0
