@@ -16,7 +16,8 @@ RUN nix-env -iA \
     nixpkgs.jq \
     nixpkgs.bash \
     nixpkgs.git \
-    nixpkgs.curl
+    nixpkgs.curl \
+    nixpkgs.shadow
 
 # Install Claude Code
 RUN npm install -g @anthropic-ai/claude-code
@@ -29,9 +30,19 @@ ENV LD_LIBRARY_PATH=/root/.nix-profile/lib
 
 RUN pip install --break-system-packages -e .
 
+# Create non-root overlord user
+RUN useradd -m -s /bin/bash overlord
+
+# Ensure nix-installed binaries and libraries are available to the overlord user
+ENV PATH="/root/.nix-profile/bin:${PATH}"
+
 # Database lives on a runtime-attached volume
 ENV XDG_DATA_HOME=/data
+RUN mkdir -p /data && chown overlord:overlord /data
 VOLUME /data
+
+# Working directory for CLAUDE.md and agent workspace
+RUN mkdir -p /vault && chown overlord:overlord /vault
 VOLUME /vault
 
 # MCP HTTP server default port
@@ -39,5 +50,8 @@ EXPOSE 8000
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+RUN chown -R overlord:overlord /app
+USER overlord
 
 ENTRYPOINT ["/entrypoint.sh"]
