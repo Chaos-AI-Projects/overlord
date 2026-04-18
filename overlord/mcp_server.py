@@ -272,8 +272,9 @@ def create_mcp_server(
             except (json.JSONDecodeError, TypeError):
                 pass
             # Resolve source job name
-            job_name = None
-            if msg.source_job_id is not None:
+            if msg.source_job_id is None:
+                job_name = "(cli)"
+            else:
                 job_name = job_name_cache.get(msg.source_job_id)
                 if job_name is None:
                     job = db.get_job(msg.source_job_id)

@@ -77,7 +77,7 @@ def _print_messages(raw: str) -> None:
     print("-" * 93)
     for m in messages:
         consumer = m.get("consumer") or ""
-        job_label = m.get("source_job_name") or ("(cli)" if m.get("source_job_id") is None else str(m.get("source_job_id", "")))
+        job_label = m.get("source_job_name") or str(m.get("source_job_id", ""))
         print(fmt.format(
             m.get("id", ""),
             job_label[:20],

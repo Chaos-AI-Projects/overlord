@@ -402,5 +402,5 @@ class TestToolsIntegration:
         result = json.loads(tool_map["query_messages"]())
         assert len(result) == 1
         assert result[0]["source_job_id"] is None
-        assert result[0]["source_job_name"] is None
+        assert result[0]["source_job_name"] == "(cli)"
         db.close()
