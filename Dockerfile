@@ -41,10 +41,6 @@ ENV XDG_DATA_HOME=/data
 RUN mkdir -p /data && chown overlord:overlord /data
 VOLUME /data
 
-# Working directory for CLAUDE.md and agent workspace
-RUN mkdir -p /vault && chown overlord:overlord /vault
-VOLUME /vault
-
 # MCP HTTP server default port
 EXPOSE 8000
 

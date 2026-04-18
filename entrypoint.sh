@@ -8,12 +8,12 @@ if [ "$VOLUME_UID" != "0" ]; then
     CURRENT_UID=$(id -u overlord)
     if [ "$VOLUME_UID" != "$CURRENT_UID" ]; then
         usermod -u "$VOLUME_UID" overlord
-        # Fix ownership of app and working dirs after UID change
-        chown -R overlord:overlord /app /data /vault
+        # Fix ownership of app dir after UID change
+        chown -R overlord:overlord /app
     fi
 fi
 
-cd /vault
+cd /home/overlord
 
 # Initialize the database schema on the mounted volume
 su -s /bin/bash overlord -c "overlord init"
