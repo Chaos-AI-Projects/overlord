@@ -22,7 +22,7 @@ RUN nix-env -iA \
 # Install gws-cli (Google Workspace CLI) v0.22.5 with checksum verification
 RUN curl -sL -o /tmp/gws.tar.gz https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz && \
     echo "4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920  /tmp/gws.tar.gz" | sha256sum -c - && \
-    tar xzf /tmp/gws.tar.gz -C /usr/local/bin gws && \
+    tar xzf /tmp/gws.tar.gz -C /usr/local/bin ./gws && \
     chmod +x /usr/local/bin/gws && \
     rm /tmp/gws.tar.gz
 
