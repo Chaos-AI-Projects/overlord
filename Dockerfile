@@ -19,6 +19,11 @@ RUN nix-env -iA \
     nixpkgs.curl \
     nixpkgs.shadow
 
+# Install gws-cli (Google Workspace CLI) v0.22.5
+RUN curl -sL https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz \
+    | tar xzf - -C /usr/local/bin gws && \
+    chmod +x /usr/local/bin/gws
+
 # Install Claude Code
 RUN npm install -g @anthropic-ai/claude-code
 
