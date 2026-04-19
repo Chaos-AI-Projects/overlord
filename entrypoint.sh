@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Detect the UID of the mounted /data volume and adjust the overlord user to match,
+# Detect the UID of the mounted /home/overlord volume and adjust the overlord user to match,
 # so files created inside the container have the correct ownership on the host.
-VOLUME_UID=$(stat -c '%u' /data)
+VOLUME_UID=$(stat -c '%u' /home/overlord)
 if [ "$VOLUME_UID" != "0" ]; then
     CURRENT_UID=$(id -u overlord)
     if [ "$VOLUME_UID" != "$CURRENT_UID" ]; then
@@ -13,11 +13,14 @@ if [ "$VOLUME_UID" != "0" ]; then
     fi
 fi
 
-cd /home/overlord
+# Create required directories with correct ownership
+mkdir -p /home/overlord/.local/share /home/overlord/brain
+chown -R overlord:overlord /home/overlord/.local /home/overlord/brain
+
+cd /home/overlord/brain
 
 # Initialize the database schema on the mounted volume
-# Note: su resets the environment, so we must pass XDG_DATA_HOME explicitly
-su -s /bin/bash overlord -c "XDG_DATA_HOME=/data overlord init"
+su -s /bin/bash overlord -c "overlord init"
 
 # Start the scheduler daemon as overlord
-exec su -s /bin/bash overlord -c "XDG_DATA_HOME=/data exec overlord daemon $*"
+exec su -s /bin/bash overlord -c "exec overlord daemon $*"

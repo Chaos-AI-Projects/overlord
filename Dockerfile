@@ -36,10 +36,8 @@ RUN useradd -m -s /bin/bash overlord
 # Ensure nix-installed binaries and libraries are available to the overlord user
 ENV PATH="/root/.nix-profile/bin:${PATH}"
 
-# Database lives on a runtime-attached volume
-ENV XDG_DATA_HOME=/data
-RUN mkdir -p /data && chown overlord:overlord /data
-VOLUME /data
+# All persistent state lives under /home/overlord (single mounted volume)
+VOLUME /home/overlord
 
 # MCP HTTP server default port
 EXPOSE 8000
