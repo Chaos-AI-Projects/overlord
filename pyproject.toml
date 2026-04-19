@@ -21,6 +21,9 @@ test = [
 [project.scripts]
 overlord = "overlord.cli:main"
 
+[tool.setuptools.package-data]
+overlord = ["scripts/*.sh"]
+
 [tool.setuptools.packages.find]
 include = ["overlord*"]
 

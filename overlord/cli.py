@@ -26,8 +26,8 @@ from typing import Optional
 
 DEFAULT_MCP_URL = "http://127.0.0.1:8000/mcp/"
 
-# Path to the bundled wrapper script (relative to this file).
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+# Path to the bundled wrapper script (inside the installed package).
+_SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
 _OVERLORD_JOB_SCRIPT = _SCRIPTS_DIR / "overlord_job.sh"
 
 
