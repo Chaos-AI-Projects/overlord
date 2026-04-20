@@ -170,7 +170,7 @@ def _print_job_status(raw: str) -> None:
 
 def cmd_init(args: argparse.Namespace) -> None:
     """Scaffold a vault directory, initialize the DB, and register the overlord job."""
-    from .database import Database
+    from .database import DEFAULT_DB_PATH, Database
     from .models import Job
     from .vault_template import VAULT_CLAUDE_MD
 
@@ -194,8 +194,10 @@ def cmd_init(args: argparse.Namespace) -> None:
         dest_script.chmod(0o755)
         print(f"Copied wrapper script to {dest_script}")
 
-    # Initialize database directly (no daemon needed)
-    db_path = vault / "overlord.db"
+    # Initialize database at the shared default location so that
+    # `overlord init && overlord daemon` works without any --db flags.
+    db_path = DEFAULT_DB_PATH
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     db = Database(db_path)
     db.init_schema()
     print(f"Initialized database at {db_path}")
@@ -218,7 +220,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     db.close()
 
     print(f"\nVault initialized at {vault}")
-    print(f"Start the daemon with: cd {vault} && overlord daemon --db {db_path}")
+    print(f"Start the daemon with: overlord daemon")
 
 
 def cmd_daemon(args: argparse.Namespace) -> None:
