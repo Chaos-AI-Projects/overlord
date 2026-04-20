@@ -79,6 +79,64 @@ overlord/
 |----------|---------|-------------|
 | `XDG_DATA_HOME` | `~/.local/share` | Data directory (DB stored at `$XDG_DATA_HOME/overlord/overlord.db`) |
 
+## Container
+
+### Prerequisites
+
+- [Nix](https://nixos.org/download/) with flakes enabled
+
+### Building the image
+
+From the repository root:
+
+```bash
+nix build .#container
+```
+
+This produces a `result` symlink pointing to a layered OCI image tarball (~274 MB).
+
+### Loading the image
+
+```bash
+# Podman
+podman load < result
+
+# Docker
+docker load < result
+```
+
+The image is tagged `overlord:latest`.
+
+### Running the container
+
+```bash
+# Create a persistent volume directory
+mkdir -p ~/overlord-data
+
+# Run with podman
+podman run -d \
+  --name overlord \
+  -p 8000:8000 \
+  -v ~/overlord-data:/home/overlord:Z \
+  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  overlord:latest
+```
+
+Replace `podman` with `docker` if using Docker. The container:
+
+- Exposes the MCP server on port **8000**
+- Persists all state (database, claude-code install, brain/) in the mounted volume at `/home/overlord`
+- Auto-installs `claude-code` on first start into the volume
+- Remaps the internal `overlord` user UID to match the volume owner, so host file permissions stay correct
+- Passes any extra arguments to `overlord daemon` (e.g., `--tick 30`)
+
+### Building just the Python package
+
+```bash
+nix build .#overlord
+# or: nix build  (overlord is the default package)
+```
+
 ## Key Dependencies
 
 Python 3.10+: mcp
