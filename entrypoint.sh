@@ -27,6 +27,7 @@ if [ ! -x "${NPM_CONFIG_PREFIX}/bin/claude" ]; then
 fi
 
 cd /home/overlord/brain
+export HOME=/home/overlord
 
 # Initialize the database schema on the mounted volume
 setpriv --reuid="$OVERLORD_UID" --regid="$OVERLORD_GID" --clear-groups \
