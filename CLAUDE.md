@@ -132,8 +132,9 @@ Replace `podman` with `docker` if using Docker. The container:
 
 ### Building just the Python package
 
+From the current directory:
+
 ```bash
-cd overlord
 nix build .#overlord
 # or: nix build  (overlord is the default package)
 ```
