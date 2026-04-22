@@ -87,10 +87,17 @@ overlord/
 
 ### Building the image
 
-From the repository root:
+From the `overlord/` directory:
 
 ```bash
+cd overlord
 nix build .#container
+```
+
+Or from the repository root:
+
+```bash
+nix build ./overlord#container
 ```
 
 This produces a `result` symlink pointing to a layered OCI image tarball (~274 MB).
@@ -133,6 +140,7 @@ Replace `podman` with `docker` if using Docker. The container:
 ### Building just the Python package
 
 ```bash
+cd overlord
 nix build .#overlord
 # or: nix build  (overlord is the default package)
 ```
