@@ -87,17 +87,10 @@ overlord/
 
 ### Building the image
 
-From the `overlord/` directory:
+From the current directory:
 
 ```bash
-cd overlord
 nix build .#container
-```
-
-Or from the repository root:
-
-```bash
-nix build ./overlord#container
 ```
 
 This produces a `result` symlink pointing to a layered OCI image tarball (~274 MB).
