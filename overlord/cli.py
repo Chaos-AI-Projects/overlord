@@ -56,8 +56,8 @@ def _print_json(raw: str) -> None:
         print(raw)
 
 
-def _print_messages(raw: str) -> None:
-    """Print a list of messages as a human-readable table."""
+def _print_messages(raw: str, text: bool = False) -> None:
+    """Print a list of messages as a human-readable table or full text."""
     try:
         messages = json.loads(raw)
     except json.JSONDecodeError:
@@ -70,6 +70,10 @@ def _print_messages(raw: str) -> None:
 
     if not messages:
         print("No messages found.")
+        return
+
+    if text:
+        _print_messages_text(messages)
         return
 
     fmt = "{:<6} {:<20} {:<10} {:<25} {:<30}"
@@ -85,6 +89,33 @@ def _print_messages(raw: str) -> None:
             consumer[:25],
             str(m.get("created_at", ""))[:30],
         ))
+
+
+def _print_messages_text(messages: list[dict]) -> None:
+    """Print messages in plain-text record format with full payload."""
+    for i, m in enumerate(messages):
+        if i > 0:
+            print()
+        msg_id = m.get("id", "?")
+        job_label = m.get("source_job_name") or str(m.get("source_job_id", ""))
+        consumer = m.get("consumer") or "-"
+        consumed = "yes" if m.get("consumed") else "no"
+        created = m.get("created_at", "")
+
+        print(f"--- Message {msg_id} ---")
+        print(f"Job: {job_label}")
+        print(f"Consumed: {consumed}")
+        print(f"Consumer: {consumer}")
+        print(f"Created: {created}")
+        print()
+
+        payload = m.get("payload")
+        if payload is None:
+            print("(no payload)")
+        elif isinstance(payload, dict) or isinstance(payload, list):
+            print(json.dumps(payload, indent=2))
+        else:
+            print(str(payload))
 
 
 def _print_job_table(raw: str) -> None:
@@ -340,7 +371,7 @@ def cmd_messages(args: argparse.Namespace) -> None:
         arguments["limit"] = args.limit
 
     raw = asyncio.run(_call_tool(args.mcp_url, "query_messages", arguments))
-    _print_messages(raw)
+    _print_messages(raw, text=args.text)
 
 
 # -- Argument parser --
@@ -416,6 +447,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_msg.add_argument("--consumer", metavar="NAME", help="Filter by consumer tag")
     p_msg.add_argument("--unconsumed", action="store_true", help="Show only unconsumed messages")
     p_msg.add_argument("--limit", type=int, metavar="N", help="Maximum number of results")
+    p_msg.add_argument("--text", action="store_true", help="Print full message contents in plain-text format")
     p_msg.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
     p_msg.set_defaults(func=cmd_messages)
 

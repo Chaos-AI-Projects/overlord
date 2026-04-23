@@ -12,6 +12,7 @@ from overlord.cli import (
     _print_job_status,
     _print_job_table,
     _print_messages,
+    _print_messages_text,
     build_parser,
     cmd_list,
     cmd_messages,
@@ -106,6 +107,12 @@ class TestBuildParser:
         assert args.consumer is None
         assert args.unconsumed is False
         assert args.limit is None
+        assert args.text is False
+
+    def test_messages_text_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["messages", "--text"])
+        assert args.text is True
 
     def test_messages_with_filters(self):
         parser = build_parser()
@@ -229,6 +236,74 @@ class TestPrintMessages:
             _print_messages(json.dumps({"error": "something broke"}))
         assert "something broke" in capsys.readouterr().err
 
+    def test_text_mode_dispatches(self, capsys):
+        messages = [
+            {"id": 1, "source_job_name": "my-job", "consumed": False,
+             "consumer": "agent", "created_at": "2026-01-01 00:00:00",
+             "payload": {"message": "hello world"}},
+        ]
+        _print_messages(json.dumps(messages), text=True)
+        out = capsys.readouterr().out
+        assert "--- Message 1 ---" in out
+        assert "hello world" in out
+
+    def test_text_mode_empty(self, capsys):
+        _print_messages("[]", text=True)
+        assert "No messages found" in capsys.readouterr().out
+
+
+class TestPrintMessagesText:
+    def test_single_message_with_dict_payload(self, capsys):
+        messages = [
+            {"id": 42, "source_job_name": "my-job", "consumed": False,
+             "consumer": "worker-1", "created_at": "2026-04-22 11:48:16",
+             "payload": {"message": "task completed"}},
+        ]
+        _print_messages_text(messages)
+        out = capsys.readouterr().out
+        assert "--- Message 42 ---" in out
+        assert "Job: my-job" in out
+        assert "Consumed: no" in out
+        assert "Consumer: worker-1" in out
+        assert "Created: 2026-04-22 11:48:16" in out
+        assert '"message": "task completed"' in out
+
+    def test_multiple_messages(self, capsys):
+        messages = [
+            {"id": 1, "source_job_name": "job-a", "consumed": True,
+             "consumer": None, "created_at": "2026-01-01",
+             "payload": "plain text payload"},
+            {"id": 2, "source_job_name": "job-b", "consumed": False,
+             "consumer": "agent", "created_at": "2026-01-02",
+             "payload": {"key": "value"}},
+        ]
+        _print_messages_text(messages)
+        out = capsys.readouterr().out
+        assert "--- Message 1 ---" in out
+        assert "--- Message 2 ---" in out
+        assert "plain text payload" in out
+        assert "Consumer: -" in out  # None consumer shows as "-"
+
+    def test_null_payload(self, capsys):
+        messages = [
+            {"id": 5, "source_job_name": "job-c", "consumed": False,
+             "consumer": None, "created_at": "2026-01-01",
+             "payload": None},
+        ]
+        _print_messages_text(messages)
+        out = capsys.readouterr().out
+        assert "(no payload)" in out
+
+    def test_list_payload(self, capsys):
+        messages = [
+            {"id": 6, "source_job_name": "job-d", "consumed": False,
+             "consumer": None, "created_at": "2026-01-01",
+             "payload": [1, 2, 3]},
+        ]
+        _print_messages_text(messages)
+        out = capsys.readouterr().out
+        assert "[\n  1,\n  2,\n  3\n]" in out
+
 
 # -- Command handlers with mocked MCP calls --
 
@@ -329,6 +404,18 @@ class TestCommandHandlers:
         args = build_parser().parse_args(["messages"])
         cmd_messages(args)
         assert mock_call.call_args[0][2] == {}
+
+    @mock.patch("overlord.cli._call_tool")
+    def test_cmd_messages_text_flag(self, mock_call, capsys):
+        messages = [{"id": 1, "source_job_name": "my-job", "consumed": False,
+                     "consumer": "agent", "created_at": "2026-01-01",
+                     "payload": {"message": "hello"}}]
+        mock_call.return_value = json.dumps(messages)
+        args = build_parser().parse_args(["messages", "--text"])
+        cmd_messages(args)
+        out = capsys.readouterr().out
+        assert "--- Message 1 ---" in out
+        assert "hello" in out
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_trigger(self, mock_call, capsys):
