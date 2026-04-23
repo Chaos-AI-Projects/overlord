@@ -224,6 +224,51 @@ class TestLocks:
         assert db.get_lock("stale") is None
 
 
+class TestFailRunningExecutions:
+    def test_marks_running_as_failed(self, db):
+        job = db.create_job(make_job())
+        e1 = db.create_execution(job.id)
+        e2 = db.create_execution(job.id)
+
+        count = db.fail_running_executions()
+        assert count == 2
+
+        rec1 = db.get_execution(e1.id)
+        rec2 = db.get_execution(e2.id)
+        assert rec1.status == ExecutionStatus.FAILED
+        assert rec2.status == ExecutionStatus.FAILED
+        assert "scheduler restarted" in rec1.stderr
+
+    def test_does_not_affect_finished_executions(self, db):
+        job = db.create_job(make_job())
+        e_ok = db.create_execution(job.id)
+        db.finish_execution(e_ok.id, ExecutionStatus.SUCCESS)
+        e_fail = db.create_execution(job.id)
+        db.finish_execution(e_fail.id, ExecutionStatus.FAILED)
+
+        count = db.fail_running_executions()
+        assert count == 0
+
+        assert db.get_execution(e_ok.id).status == ExecutionStatus.SUCCESS
+        assert db.get_execution(e_fail.id).status == ExecutionStatus.FAILED
+
+    def test_fail_then_release_cleans_orphaned_locks(self, db):
+        """Simulates unclean shutdown: execution still RUNNING with held lock."""
+        job = db.create_job(make_job())
+        execution = db.create_execution(job.id)
+        db.acquire_lock("orphaned", execution.id)
+
+        # Before fix: release_stale_locks alone would NOT clear this
+        assert db.get_lock("orphaned") is not None
+
+        # The startup sequence: fail running, then release stale locks
+        db.fail_running_executions()
+        released = db.release_stale_locks()
+
+        assert released == 1
+        assert db.get_lock("orphaned") is None
+
+
 class TestQueryMessages:
     def test_query_all(self, db):
         job = db.create_job(make_job())

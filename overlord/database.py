@@ -509,6 +509,26 @@ class Database:
             acquired_at=row["acquired_at"],
         )
 
+    def fail_running_executions(self) -> int:
+        """Mark all RUNNING executions as FAILED.
+
+        Called on scheduler startup: nothing can genuinely be running when the
+        process has just started, so any leftover RUNNING rows are from a
+        previous unclean shutdown (e.g. container kill).
+        Returns the number of affected rows.
+        """
+        cur = self.conn.execute(
+            "UPDATE execution_history SET status = ?, finished_at = CURRENT_TIMESTAMP, "
+            "stderr = ? WHERE status = ?",
+            (
+                ExecutionStatus.FAILED.value,
+                "Marked failed: scheduler restarted while execution was in progress",
+                ExecutionStatus.RUNNING.value,
+            ),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     def release_stale_locks(self) -> int:
         """Release locks held by executions that are no longer running.
         Returns the number of stale locks released."""

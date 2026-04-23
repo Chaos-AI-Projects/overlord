@@ -63,6 +63,10 @@ class Scheduler:
         self._db.init_schema()
         self._db.check_schema_version()
 
+        failed = self._db.fail_running_executions()
+        if failed:
+            logger.info("Marked %d orphaned running execution(s) as failed", failed)
+
         released = self._db.release_stale_locks()
         if released:
             logger.info("Released %d stale lock(s) from previous run", released)
