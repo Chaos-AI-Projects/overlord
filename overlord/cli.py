@@ -22,10 +22,24 @@ import asyncio
 import json
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 DEFAULT_MCP_URL = "http://127.0.0.1:8000/mcp/"
+
+
+def _utc_to_local(ts: str) -> str:
+    """Convert a UTC timestamp string from the database to local time for display."""
+    if not ts:
+        return ""
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return ts
 
 # Path to the bundled wrapper script (inside the installed package).
 _SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
@@ -88,7 +102,7 @@ def _print_messages(raw: str, text: bool = False) -> None:
             job_label[:20],
             "yes" if m.get("consumed") else "no",
             consumer[:25],
-            str(m.get("created_at", ""))[:30],
+            _utc_to_local(str(m.get("created_at", "")))[:30],
         ))
 
 
@@ -101,7 +115,7 @@ def _print_messages_text(messages: list[dict]) -> None:
         job_label = m.get("source_job_name") or str(m.get("source_job_id", ""))
         consumer = m.get("consumer") or "-"
         consumed = "yes" if m.get("consumed") else "no"
-        created = m.get("created_at", "")
+        created = _utc_to_local(m.get("created_at", ""))
 
         print(f"--- Message {msg_id} ---")
         print(f"Job: {job_label}")
@@ -176,8 +190,8 @@ def _print_job_status(raw: str) -> None:
         print(f"Timeout:  {data['timeout_seconds']}s")
     if data.get("max_retries"):
         print(f"Retries:  {data['max_retries']} (delay {data.get('retry_delay_seconds', 0)}s)")
-    print(f"Created:  {data.get('created_at')}")
-    print(f"Updated:  {data.get('updated_at')}")
+    print(f"Created:  {_utc_to_local(data.get('created_at', ''))}")
+    print(f"Updated:  {_utc_to_local(data.get('updated_at', ''))}")
 
     execs = data.get("recent_executions", [])
     if execs:
@@ -190,8 +204,8 @@ def _print_job_status(raw: str) -> None:
                 e.get("id", ""),
                 e.get("status", ""),
                 str(e.get("exit_code", "")),
-                str(e.get("started_at", ""))[:20],
-                str(e.get("finished_at", ""))[:20],
+                _utc_to_local(str(e.get("started_at", "")))[:20],
+                _utc_to_local(str(e.get("finished_at", "")))[:20],
             ))
     else:
         print("\nNo recent executions.")
