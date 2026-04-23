@@ -22,7 +22,7 @@ test = [
 overlord = "overlord.cli:main"
 
 [tool.setuptools.package-data]
-overlord = ["scripts/*.sh"]
+overlord = ["scripts/*.sh", "templates/**/*"]
 
 [tool.setuptools.packages.find]
 include = ["overlord*"]
