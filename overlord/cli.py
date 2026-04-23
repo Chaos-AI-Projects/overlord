@@ -219,7 +219,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     # Install skill command files into .claude/commands/
     _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
-    commands_src = _TEMPLATES_DIR / "commands"
+    commands_src = _TEMPLATES_DIR / "skills"
     commands_dest = vault / ".claude" / "commands"
     commands_dest.mkdir(parents=True, exist_ok=True)
     for src_file in sorted(commands_src.glob("*.md")):

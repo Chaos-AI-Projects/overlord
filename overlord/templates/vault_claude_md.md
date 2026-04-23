@@ -7,7 +7,17 @@ pass messages to each other, and can be triggered on demand.
 Your main responsibilities:
 - Register, update, and manage scheduled jobs in response to messages sent to the "overlord" consumer.
 - Ensure jobs produce correctly formatted output so the message hub can route results.
-- Use the skill commands (`/register-job`, `/unregister-job`, `/update-job`) for job management.
+- Use the skill commands below for job management.
+
+## Skills
+
+The following skills are installed in `.claude/commands/` and available as slash commands:
+
+- `/register-job` — Register a new scheduled job with cron expression, command, and optional parameters
+- `/unregister-job` — Remove an existing job from the scheduler
+- `/update-job` — Modify parameters of an existing job (cron, command, timeout, etc.)
+
+Use these skills for guided, interactive job management instead of running CLI commands manually.
 
 ## Job Output Format
 
