@@ -11,6 +11,7 @@ Usage::
     overlord list [--status STATUS] [--mcp-url URL]
     overlord status JOB_NAME [--mcp-url URL]
     overlord register --name NAME --cron EXPR --command CMD [options] [--mcp-url URL]
+    overlord update --name NAME [--cron EXPR] [--command CMD] [options] [--mcp-url URL]
     overlord unregister JOB_NAME [--mcp-url URL]
     overlord trigger JOB_NAME [--mcp-url URL]
     overlord send [--consumer NAME] [--payload TEXT] [--mcp-url URL]
@@ -216,6 +217,19 @@ def cmd_init(args: argparse.Namespace) -> None:
         claude_md.write_text(VAULT_CLAUDE_MD)
         print(f"Created {claude_md}")
 
+    # Install skill command files into .claude/commands/
+    _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+    commands_src = _TEMPLATES_DIR / "commands"
+    commands_dest = vault / ".claude" / "commands"
+    commands_dest.mkdir(parents=True, exist_ok=True)
+    for src_file in sorted(commands_src.glob("*.md")):
+        dest_file = commands_dest / src_file.name
+        if dest_file.exists():
+            print(f"{dest_file.name} already exists in .claude/commands/, skipping")
+        else:
+            shutil.copy2(src_file, dest_file)
+            print(f"Installed skill: /{ src_file.stem}")
+
     # Copy wrapper script into the vault
     dest_script = vault / "overlord_job.sh"
     if dest_script.exists():
@@ -309,6 +323,36 @@ def cmd_register(args: argparse.Namespace) -> None:
         print(f"Error: {data['error']}", file=sys.stderr)
         sys.exit(1)
     print(f"Registered job '{data['name']}' (id={data['id']})")
+
+
+def cmd_update(args: argparse.Namespace) -> None:
+    """Update an existing job's parameters."""
+    arguments: dict = {"name": args.name}
+    if args.cron is not None:
+        arguments["cron_expression"] = args.cron
+    if args.command is not None:
+        arguments["command"] = args.command
+    if args.lock is not None:
+        arguments["exclusive_lock"] = args.lock
+    if args.timeout is not None:
+        arguments["timeout_seconds"] = args.timeout
+    if args.retries is not None:
+        arguments["max_retries"] = args.retries
+    if args.retry_delay is not None:
+        arguments["retry_delay_seconds"] = args.retry_delay
+    if args.consumes is not None:
+        arguments["consumes"] = args.consumes
+
+    if len(arguments) == 1:
+        print("Error: no fields to update. Provide at least one option.", file=sys.stderr)
+        sys.exit(1)
+
+    raw = asyncio.run(_call_tool(args.mcp_url, "update_job", arguments))
+    data = json.loads(raw)
+    if "error" in data:
+        print(f"Error: {data['error']}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Updated job '{data['name']}' (id={data['id']})")
 
 
 def cmd_unregister(args: argparse.Namespace) -> None:
@@ -421,6 +465,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--consumes", metavar="NAMES", help="Comma-separated consumer names or '*' for catch-all")
     p_reg.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
     p_reg.set_defaults(func=cmd_register)
+
+    # update
+    p_upd = sub.add_parser("update", help="Update an existing job's parameters")
+    p_upd.add_argument("--name", required=True, help="Job name to update")
+    p_upd.add_argument("--cron", metavar="EXPR", help="New cron expression (5-field)")
+    p_upd.add_argument("--command", metavar="CMD", help="New shell command")
+    p_upd.add_argument("--lock", metavar="NAME", help="New exclusive lock name (empty to clear)")
+    p_upd.add_argument("--timeout", type=int, metavar="SEC", help="New timeout in seconds")
+    p_upd.add_argument("--retries", type=int, metavar="N", help="New max retries")
+    p_upd.add_argument("--retry-delay", type=int, metavar="SEC", help="New retry delay in seconds")
+    p_upd.add_argument("--consumes", metavar="NAMES", help="New consumer names (comma-separated, empty to clear)")
+    p_upd.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
+    p_upd.set_defaults(func=cmd_update)
 
     # unregister
     p_unreg = sub.add_parser("unregister", help="Remove a job by name")

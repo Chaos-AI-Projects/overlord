@@ -50,7 +50,29 @@ class TestCmdInit:
 
         content = (vault / "CLAUDE.md").read_text()
         assert "overlord" in content.lower()
-        assert "overlord register" in content
+        assert "Job Output Format" in content
+        assert "periodical" in content.lower()
+
+    def test_skills_installed(self, tmp_path, default_db_path):
+        vault = tmp_path / "vault"
+        args = build_parser().parse_args(["init", str(vault)])
+        cmd_init(args)
+
+        commands_dir = vault / ".claude" / "commands"
+        assert commands_dir.exists()
+        assert (commands_dir / "register-job.md").exists()
+        assert (commands_dir / "unregister-job.md").exists()
+        assert (commands_dir / "update-job.md").exists()
+
+    def test_skills_content(self, tmp_path, default_db_path):
+        vault = tmp_path / "vault"
+        args = build_parser().parse_args(["init", str(vault)])
+        cmd_init(args)
+
+        register = (vault / ".claude" / "commands" / "register-job.md").read_text()
+        assert "overlord register" in register
+        update = (vault / ".claude" / "commands" / "update-job.md").read_text()
+        assert "overlord update" in update
 
     def test_wrapper_script_executable(self, tmp_path, default_db_path):
         vault = tmp_path / "vault"

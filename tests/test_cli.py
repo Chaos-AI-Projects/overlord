@@ -20,6 +20,7 @@ from overlord.cli import (
     cmd_status,
     cmd_trigger,
     cmd_unregister,
+    cmd_update,
 )
 from overlord.database import Database
 from overlord.mcp_server import create_mcp_server
@@ -124,6 +125,26 @@ class TestBuildParser:
         assert args.consumer == "agent"
         assert args.unconsumed is True
         assert args.limit == 10
+
+    def test_update_command(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "update", "--name", "my-job", "--cron", "*/10 * * * *",
+            "--command", "new-cmd.sh", "--timeout", "120",
+        ])
+        # Note: args.command is overridden by --command flag; check func instead
+        assert args.func == cmd_update
+        assert args.name == "my-job"
+        assert args.cron == "*/10 * * * *"
+        assert args.command == "new-cmd.sh"
+        assert args.timeout == 120
+
+    def test_update_minimal(self):
+        parser = build_parser()
+        args = parser.parse_args(["update", "--name", "my-job", "--cron", "0 * * * *"])
+        assert args.name == "my-job"
+        assert args.cron == "0 * * * *"
+        assert args.command is None
 
     def test_custom_mcp_url(self):
         parser = build_parser()
@@ -416,6 +437,34 @@ class TestCommandHandlers:
         out = capsys.readouterr().out
         assert "--- Message 1 ---" in out
         assert "hello" in out
+
+    @mock.patch("overlord.cli._call_tool")
+    def test_cmd_update(self, mock_call, capsys):
+        mock_call.return_value = json.dumps({"name": "my-job", "id": 3})
+        args = build_parser().parse_args([
+            "update", "--name", "my-job", "--cron", "*/10 * * * *",
+        ])
+        cmd_update(args)
+        call_args = mock_call.call_args[0][2]
+        assert call_args["name"] == "my-job"
+        assert call_args["cron_expression"] == "*/10 * * * *"
+        assert "Updated" in capsys.readouterr().out
+
+    @mock.patch("overlord.cli._call_tool")
+    def test_cmd_update_error(self, mock_call, capsys):
+        mock_call.return_value = json.dumps({"error": "Job 'ghost' not found"})
+        args = build_parser().parse_args([
+            "update", "--name", "ghost", "--cron", "* * * * *",
+        ])
+        with pytest.raises(SystemExit):
+            cmd_update(args)
+        assert "not found" in capsys.readouterr().err
+
+    def test_cmd_update_no_fields(self, capsys):
+        args = build_parser().parse_args(["update", "--name", "my-job"])
+        with pytest.raises(SystemExit):
+            cmd_update(args)
+        assert "no fields to update" in capsys.readouterr().err
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_trigger(self, mock_call, capsys):

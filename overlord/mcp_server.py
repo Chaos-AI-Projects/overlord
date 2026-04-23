@@ -182,6 +182,69 @@ def create_mcp_server(
         return json.dumps({"status": "deleted", "name": name, "id": job.id})
 
     @mcp.tool()
+    def update_job(
+        name: str,
+        cron_expression: Optional[str] = None,
+        command: Optional[str] = None,
+        exclusive_lock: Optional[str] = None,
+        timeout_seconds: Optional[int] = None,
+        max_retries: Optional[int] = None,
+        retry_delay_seconds: Optional[int] = None,
+        consumes: Optional[str] = None,
+    ) -> str:
+        """Update an existing job's parameters.
+
+        Only the provided fields are updated; omitted fields remain unchanged.
+
+        Parameters
+        ----------
+        name : str
+            The unique name of the job to update (required, used to look up the job).
+        cron_expression : str, optional
+            New 5-field cron schedule.
+        command : str, optional
+            New shell command to execute.
+        exclusive_lock : str, optional
+            New named lock. Pass empty string to clear.
+        timeout_seconds : int, optional
+            New timeout in seconds.
+        max_retries : int, optional
+            New max retries.
+        retry_delay_seconds : int, optional
+            New retry delay in seconds.
+        consumes : str, optional
+            New comma-separated consumer names, or ``"*"`` for catch-all.
+            Pass empty string to clear.
+
+        Returns
+        -------
+        str
+            JSON object with the updated job details or an error message.
+        """
+        job = db.get_job_by_name(name)
+        if job is None:
+            return json.dumps({"error": f"Job '{name}' not found"})
+
+        if cron_expression is not None:
+            job.cron_expression = cron_expression
+        if command is not None:
+            job.command = command
+        if exclusive_lock is not None:
+            job.exclusive_lock = exclusive_lock if exclusive_lock else None
+        if timeout_seconds is not None:
+            job.timeout_seconds = timeout_seconds
+        if max_retries is not None:
+            job.max_retries = max_retries
+        if retry_delay_seconds is not None:
+            job.retry_delay_seconds = retry_delay_seconds
+        if consumes is not None:
+            job.consumes = [c.strip() for c in consumes.split(",") if c.strip()] if consumes else []
+
+        db.update_job(job)
+        logger.info("Updated job %r (id=%s)", name, job.id)
+        return json.dumps(_job_to_dict(job))
+
+    @mcp.tool()
     def list_jobs(status: Optional[str] = None) -> str:
         """List all registered jobs, optionally filtered by status.
 

@@ -306,6 +306,73 @@ class TestToolsIntegration:
         assert "error" in result
         db.close()
 
+    def test_update_job(self, tools):
+        tool_map, db = tools
+        tool_map["register_job"](
+            name="updatable",
+            cron_expression="* * * * *",
+            command="echo old",
+        )
+        result = json.loads(tool_map["update_job"](
+            name="updatable",
+            cron_expression="*/10 * * * *",
+            command="echo new",
+            timeout_seconds=120,
+        ))
+        assert result["name"] == "updatable"
+        assert result["cron_expression"] == "*/10 * * * *"
+        assert result["command"] == "echo new"
+        assert result["timeout_seconds"] == 120
+        # Verify via DB
+        fetched = db.get_job_by_name("updatable")
+        assert fetched.cron_expression == "*/10 * * * *"
+        assert fetched.command == "echo new"
+        db.close()
+
+    def test_update_job_partial(self, tools):
+        tool_map, db = tools
+        tool_map["register_job"](
+            name="partial-update",
+            cron_expression="* * * * *",
+            command="echo original",
+            timeout_seconds=60,
+        )
+        # Only update cron, command should remain unchanged
+        result = json.loads(tool_map["update_job"](
+            name="partial-update",
+            cron_expression="*/5 * * * *",
+        ))
+        assert result["cron_expression"] == "*/5 * * * *"
+        assert result["command"] == "echo original"
+        assert result["timeout_seconds"] == 60
+        db.close()
+
+    def test_update_job_nonexistent(self, tools):
+        tool_map, db = tools
+        result = json.loads(tool_map["update_job"](name="ghost"))
+        assert "error" in result
+        db.close()
+
+    def test_update_job_consumes(self, tools):
+        tool_map, db = tools
+        tool_map["register_job"](
+            name="consumer-update",
+            cron_expression="* * * * *",
+            command="echo hi",
+        )
+        result = json.loads(tool_map["update_job"](
+            name="consumer-update",
+            consumes="job-a,job-b",
+        ))
+        assert result["consumes"] == ["job-a", "job-b"]
+        # Clear consumes
+        result = json.loads(tool_map["update_job"](
+            name="consumer-update",
+            consumes="",
+        ))
+        assert result["consumes"] == []
+        db.close()
+
     def test_query_messages_all(self, tools):
         tool_map, db = tools
         tool_map["register_job"](name="msg-job", cron_expression="* * * * *", command="echo hi")
