@@ -1,3 +1,7 @@
+---
+description: Register a new scheduled job in the overlord system
+---
+
 Register a new scheduled job in the overlord system.
 
 Gather the following information, then run the `overlord register` command:

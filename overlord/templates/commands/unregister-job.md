@@ -1,3 +1,7 @@
+---
+description: Remove a scheduled job from the overlord system
+---
+
 Remove a scheduled job from the overlord system.
 
 Before unregistering, confirm which job to remove:

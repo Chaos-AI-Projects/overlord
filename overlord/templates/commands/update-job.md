@@ -1,3 +1,7 @@
+---
+description: Update an existing job's parameters in the overlord system
+---
+
 Update an existing job's parameters in the overlord system.
 
 1. Run `overlord status <job-name>` to see the current configuration
