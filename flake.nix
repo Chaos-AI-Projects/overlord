@@ -44,7 +44,6 @@
       pkgs.findutils
       pkgs.gnugrep
       pkgs.gnused
-      pkgs.gosu          # drop-root in containers (replaces su)
       pkgs.jq
       pkgs.git
       pkgs.curl
@@ -58,37 +57,16 @@
     entrypoint = pkgs.writeShellScript "entrypoint.sh" ''
       set -euo pipefail
 
-      OVERLORD_UID=1000
-      OVERLORD_GID=1000
-
-      # Detect the UID/GID of the mounted /home/overlord volume and remap the
-      # overlord user/group so files have correct ownership on the host.
-      VOLUME_UID=$(stat -c '%u' /home/overlord)
-      VOLUME_GID=$(stat -c '%g' /home/overlord)
-      if [ "$VOLUME_UID" != "0" ] && [ "$VOLUME_UID" != "$OVERLORD_UID" ]; then
-          sed -i "s/^overlord:x:''${OVERLORD_UID}:/overlord:x:''${VOLUME_UID}:/" /etc/passwd
-          OVERLORD_UID="$VOLUME_UID"
-      fi
-      if [ "$VOLUME_GID" != "0" ] && [ "$VOLUME_GID" != "$OVERLORD_GID" ]; then
-          sed -i "s/^overlord:x:''${OVERLORD_GID}:/overlord:x:''${VOLUME_GID}:/" /etc/group
-          sed -i "s/^\(overlord:x:''${OVERLORD_UID}\):''${OVERLORD_GID}:/\1:''${VOLUME_GID}:/" /etc/passwd
-          OVERLORD_GID="$VOLUME_GID"
-      fi
-
-      # Ensure overlord user owns their home directory and required subdirs
-      chown "''${OVERLORD_UID}:''${OVERLORD_GID}" /home/overlord
-      mkdir -p /home/overlord/.local/share /home/overlord/brain
-      chown -R "''${OVERLORD_UID}:''${OVERLORD_GID}" /home/overlord/.local /home/overlord/brain
-
       export HOME=/home/overlord
+      mkdir -p /home/overlord/.local/share /home/overlord/brain
 
       # Initialize the vault (scripts, CLAUDE.md) in /home/overlord/brain;
       # the database is created at DEFAULT_DB_PATH (~/.local/share/overlord/overlord.db)
       cd /home/overlord/brain
-      gosu overlord overlord init
+      overlord init
 
-      # Start the scheduler daemon as overlord (uses same DEFAULT_DB_PATH)
-      exec gosu overlord overlord daemon $*
+      # Start the scheduler daemon (uses same DEFAULT_DB_PATH)
+      exec overlord daemon $*
     '';
 
     # --------------- container image ---------------
@@ -114,7 +92,7 @@ root:!:1::::::
 overlord:!:1::::::
 SHADOW
 
-        # NSS config so gosu / id can resolve users
+        # NSS config so id(1) can resolve users
         cat > ./etc/nsswitch.conf <<'NSS'
 passwd: files
 group:  files

@@ -116,9 +116,10 @@ The image is tagged `overlord:latest`.
 # Create a persistent volume directory
 mkdir -p ~/overlord-data
 
-# Run with podman
+# Run with podman (--userns=keep-id maps host UID into the container)
 podman run -d \
   --name overlord \
+  --userns=keep-id \
   -p 8000:8000 \
   -v ~/overlord-data:/home/overlord:Z \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
@@ -130,7 +131,7 @@ Replace `podman` with `docker` if using Docker. The container:
 - Exposes the MCP server on port **8000**
 - Persists all state (database, claude-code install, brain/) in the mounted volume at `/home/overlord`
 - Auto-installs `claude-code` on first start into the volume
-- Remaps the internal `overlord` user UID to match the volume owner, so host file permissions stay correct
+- UID mapping is handled by podman (`--userns=keep-id`) rather than inside the container
 - Passes any extra arguments to `overlord daemon` (e.g., `--tick 30`)
 
 ### Building just the Python package
