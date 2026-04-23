@@ -80,7 +80,7 @@ overlord/
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `XDG_DATA_HOME` | `~/.local/share` | Data directory (DB stored at `$XDG_DATA_HOME/overlord/overlord.db`) |
-| `TZ` | `UTC` | Timezone for cron schedule evaluation and log/CLI timestamp display (e.g., `Asia/Shanghai`) |
+| `TZ` | `UTC` | Timezone for cron schedule evaluation and log/CLI timestamp display (e.g., `Australia/Sydney`) |
 
 ## Container
 
