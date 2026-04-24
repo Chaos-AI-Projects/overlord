@@ -225,8 +225,8 @@ class TestSchedulerQueues:
     """Test queue-based execution ordering in the scheduler."""
 
     @pytest.mark.asyncio
-    async def test_queue_blocks_second_job(self, scheduler):
-        """Two jobs on the same queue: second should be skipped while first runs."""
+    async def test_queue_enqueues_second_job(self, scheduler):
+        """Two jobs on the same queue: second should be enqueued while first runs."""
         scheduler._db.create_job(Job(
             name="slow-job",
             cron_expression="* * * * *",
@@ -245,11 +245,50 @@ class TestSchedulerQueues:
         assert len(scheduler._running_tasks) == 1
         assert "job-slow-job" in [t.get_name() for t in scheduler._running_tasks.values()]
 
-        # A "skipped" message should have been emitted for the blocked job.
+        # The second job should be in the pending queue, not skipped.
+        assert "serial" in scheduler._pending_queues
+        assert len(scheduler._pending_queues["serial"]) == 1
+        assert scheduler._pending_queues["serial"][0][0].name == "fast-job"
+
+        # No "skipped" message for an enqueued job.
+        msgs = scheduler._db.query_messages()
+        skipped = [m for m in msgs if '"skipped"' in m.payload]
+        assert len(skipped) == 0
+
+        # Clean up.
+        for t in scheduler._running_tasks.values():
+            t.cancel()
+        await asyncio.gather(*scheduler._running_tasks.values(), return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_same_name_dedup(self, scheduler):
+        """A job already pending in a queue should not be enqueued again."""
+        scheduler._db.create_job(Job(
+            name="slow-job",
+            cron_expression="* * * * *",
+            command="sleep 5",
+            queue_name="serial",
+        ))
+        scheduler._db.create_job(Job(
+            name="fast-job",
+            cron_expression="* * * * *",
+            command="echo done",
+            queue_name="serial",
+        ))
+
+        # First tick: slow-job runs, fast-job enqueued.
+        await scheduler._tick()
+        assert len(scheduler._pending_queues.get("serial", [])) == 1
+
+        # Second tick: fast-job already pending, should be deduped.
+        await scheduler._tick()
+        assert len(scheduler._pending_queues["serial"]) == 1
+
+        # A "skipped" message should have been emitted for the dedup.
         msgs = scheduler._db.query_messages()
         skipped = [m for m in msgs if '"skipped"' in m.payload]
         assert len(skipped) == 1
-        assert "fast-job" in skipped[0].payload
+        assert "already pending" in skipped[0].payload
 
         # Clean up.
         for t in scheduler._running_tasks.values():
@@ -296,8 +335,8 @@ class TestSchedulerQueues:
         await asyncio.gather(*scheduler._running_tasks.values(), return_exceptions=True)
 
     @pytest.mark.asyncio
-    async def test_queue_frees_after_completion(self, scheduler):
-        """After a job completes, its queue should be free for the next tick."""
+    async def test_queue_drains_after_completion(self, scheduler):
+        """After a job completes, the next pending job in its queue should launch."""
         output = json.dumps({"consumer": None, "message": "ok"})
         scheduler._db.create_job(Job(
             name="job-1",
@@ -312,16 +351,56 @@ class TestSchedulerQueues:
             queue_name="serial",
         ))
 
-        # First tick: job-1 runs, job-2 skipped.
+        # First tick: job-1 runs, job-2 enqueued.
         await scheduler._tick()
         assert len(scheduler._running_tasks) == 1
+        assert len(scheduler._pending_queues.get("serial", [])) == 1
         await asyncio.gather(*scheduler._running_tasks.values())
 
-        # Second tick: job-1 done, queue free, both should be eligible
-        # but only one can run per queue per tick.
+        # Second tick: job-1 done, queue drains — job-2 should launch from pending.
         await scheduler._tick()
         running_names = [t.get_name() for t in scheduler._running_tasks.values() if not t.done()]
-        assert len(running_names) == 1
+        assert "job-job-2" in running_names
+
+        await asyncio.gather(*scheduler._running_tasks.values(), return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_fifo_order_preserved(self, scheduler):
+        """Jobs should be drained from the pending queue in FIFO order."""
+        output = json.dumps({"consumer": None, "message": "ok"})
+        scheduler._db.create_job(Job(
+            name="blocker",
+            cron_expression="* * * * *",
+            command="sleep 5",
+            queue_name="serial",
+        ))
+        scheduler._db.create_job(Job(
+            name="second",
+            cron_expression="* * * * *",
+            command=f"echo '{output}'",
+            queue_name="serial",
+        ))
+        scheduler._db.create_job(Job(
+            name="third",
+            cron_expression="* * * * *",
+            command=f"echo '{output}'",
+            queue_name="serial",
+        ))
+
+        await scheduler._tick()
+        # blocker runs, second and third enqueued in order.
+        pending_names = [j.name for j, _ in scheduler._pending_queues.get("serial", [])]
+        assert pending_names == ["second", "third"]
+
+        # Cancel blocker to free the queue.
+        for t in scheduler._running_tasks.values():
+            t.cancel()
+        await asyncio.gather(*scheduler._running_tasks.values(), return_exceptions=True)
+
+        # Next tick drains: "second" should launch first.
+        await scheduler._tick()
+        running_names = [t.get_name() for t in scheduler._running_tasks.values() if not t.done()]
+        assert "job-second" in running_names
 
         await asyncio.gather(*scheduler._running_tasks.values(), return_exceptions=True)
 

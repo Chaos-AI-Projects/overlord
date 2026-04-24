@@ -13,6 +13,7 @@ enabled jobs are due and dispatches them via the executor.  It handles:
 """
 
 import asyncio
+import json
 import logging
 import signal
 from datetime import datetime
@@ -23,7 +24,7 @@ from .cron import CronExpression
 from .database import Database
 from .executor import run_job
 from .mcp_server import create_mcp_server
-from .models import Job, JobStatus, Message
+from .models import Job, JobStatus
 
 logger = logging.getLogger("overlord.scheduler")
 
@@ -50,6 +51,7 @@ class Scheduler:
         self._cancel_event = asyncio.Event()
         self._running_tasks: dict[int, asyncio.Task] = {}
         self._queue_tasks: dict[int, tuple[str, asyncio.Task]] = {}
+        self._pending_queues: dict[str, list[tuple[Job, Optional[list]]]] = {}
         self._cwd = Path.cwd()
         self._mcp_server = None
         self._mcp_task: Optional[asyncio.Task] = None
@@ -127,22 +129,78 @@ class Scheduler:
                 active.add(queue)
         return active
 
+    def _pending_names(self, queue_name: str) -> set[str]:
+        """Return the set of job names already waiting in a pending queue."""
+        return {job.name for job, _ in self._pending_queues.get(queue_name, [])}
+
+    def _enqueue(self, job: Job, input_messages: Optional[list]) -> None:
+        """Add a job to its queue's pending FIFO (with same-name dedup)."""
+        queue_name = job.queue_name
+        pending = self._pending_queues.setdefault(queue_name, [])
+        if job.name in {j.name for j, _ in pending}:
+            logger.info(
+                "job=%s queue=%s already pending, dedup skip",
+                job.name, queue_name,
+            )
+            self._emit_skipped_message(job, reason="already pending in queue")
+            return
+        pending.append((job, input_messages))
+        logger.info(
+            "job=%s queue=%s busy, enqueued (position=%d)",
+            job.name, queue_name, len(pending),
+        )
+
+    def _launch_job(self, job: Job, input_messages: Optional[list]) -> None:
+        """Create an asyncio task for a job and register it in tracking dicts."""
+        logger.info("job=%s is due, launching (queue=%s)", job.name, job.queue_name)
+        task = asyncio.create_task(
+            self._run_consumer_job(job, input_messages),
+            name=f"job-{job.name}",
+        )
+        self._running_tasks[job.id] = task
+        self._queue_tasks[job.id] = (job.queue_name, task)
+
+    def _drain_pending_queue(self, queue_name: str) -> None:
+        """Launch the next pending job for a queue, if any."""
+        pending = self._pending_queues.get(queue_name)
+        if not pending:
+            return
+        job, input_messages = pending.pop(0)
+        # Re-check consumer gate: messages may have been consumed since enqueue.
+        if job.consumes:
+            input_messages = self._db.fetch_unconsumed_for_consumers(job.consumes)
+            if not input_messages:
+                logger.debug(
+                    "job=%s dequeued but no unconsumed messages, dropping",
+                    job.name,
+                )
+                # Try next in queue.
+                self._drain_pending_queue(queue_name)
+                return
+        self._launch_job(job, input_messages)
+
     async def _tick(self) -> None:
         """Evaluate all enabled jobs and launch those that are due."""
         now = datetime.now()
         jobs = self._db.list_jobs(status=JobStatus.ENABLED)
 
-        # Clean up finished tasks.
+        # Clean up finished tasks and drain their queues.
         finished = [jid for jid, t in self._running_tasks.items() if t.done()]
+        queues_freed: set[str] = set()
         for jid in finished:
             task = self._running_tasks.pop(jid)
-            if task.exception():
+            if not task.cancelled() and task.exception():
                 logger.error(
                     "job_id=%d task raised: %s", jid, task.exception(),
                 )
-        finished_q = [jid for jid, (q, t) in self._queue_tasks.items() if t.done()]
-        for jid in finished_q:
-            self._queue_tasks.pop(jid)
+            if jid in self._queue_tasks:
+                queue_name, _ = self._queue_tasks.pop(jid)
+                queues_freed.add(queue_name)
+
+        # Drain pending jobs for freed queues.
+        for queue_name in queues_freed:
+            if queue_name not in self._active_queue_names():
+                self._drain_pending_queue(queue_name)
 
         busy_queues = self._active_queue_names()
 
@@ -164,16 +222,6 @@ class Scheduler:
                 logger.debug("job=%s already running, skipping", job.name)
                 continue
 
-            # Queue gate: if the job's queue already has a running job, skip
-            # and emit a "skipped" message with no consumer.
-            if job.queue_name in busy_queues:
-                logger.info(
-                    "job=%s queue=%s busy, skipping tick",
-                    job.name, job.queue_name,
-                )
-                self._emit_skipped_message(job)
-                continue
-
             # Consumer gate: if the job has a non-empty consumes list, check
             # for matching unconsumed messages.  Skip if none exist.
             input_messages = None
@@ -188,23 +236,22 @@ class Scheduler:
                     )
                     continue
 
-            logger.info("job=%s is due, launching (queue=%s)", job.name, job.queue_name)
-            task = asyncio.create_task(
-                self._run_consumer_job(job, input_messages),
-                name=f"job-{job.name}",
-            )
-            self._running_tasks[job.id] = task
-            self._queue_tasks[job.id] = (job.queue_name, task)
+            # Queue gate: if the job's queue is busy, enqueue (FIFO) with
+            # same-name dedup instead of skipping outright.
+            if job.queue_name in busy_queues:
+                self._enqueue(job, input_messages)
+                continue
+
+            self._launch_job(job, input_messages)
             busy_queues.add(job.queue_name)
 
-    def _emit_skipped_message(self, job: Job) -> None:
+    def _emit_skipped_message(self, job: Job, reason: Optional[str] = None) -> None:
         """Emit a message with no consumer indicating the job was skipped."""
-        import json
         payload = json.dumps({
             "job_name": job.name,
             "job_id": job.id,
             "status": "skipped",
-            "reason": f"queue '{job.queue_name}' is busy",
+            "reason": reason or f"queue '{job.queue_name}' is busy",
         })
         self._db.create_message(job.id, payload)
         logger.debug("job=%s emitted skipped message", job.name)

@@ -109,9 +109,6 @@ MIGRATIONS = {
         # New index for consumer lookups.
         "CREATE INDEX IF NOT EXISTS idx_messages_consumer ON messages(consumer)",
     ],
-    7: [
-        "ALTER TABLE jobs ADD COLUMN queue_name TEXT NOT NULL DEFAULT 'default'",
-    ],
     6: [
         # Make source_job_id nullable so CLI-injected messages have no source job.
         # SQLite doesn't support ALTER COLUMN, so recreate the table.
@@ -131,6 +128,9 @@ MIGRATIONS = {
         "CREATE INDEX IF NOT EXISTS idx_messages_consumed ON messages(consumed)",
         "CREATE INDEX IF NOT EXISTS idx_messages_source_job_id ON messages(source_job_id)",
         "CREATE INDEX IF NOT EXISTS idx_messages_consumer ON messages(consumer)",
+    ],
+    7: [
+        "ALTER TABLE jobs ADD COLUMN queue_name TEXT NOT NULL DEFAULT 'default'",
     ],
 }
 
