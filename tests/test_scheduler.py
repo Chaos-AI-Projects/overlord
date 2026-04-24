@@ -221,6 +221,111 @@ class TestSchedulerWithMcp:
         assert scheduler._mcp_task is None
 
 
+class TestSchedulerQueues:
+    """Test queue-based execution ordering in the scheduler."""
+
+    @pytest.mark.asyncio
+    async def test_queue_blocks_second_job(self, scheduler):
+        """Two jobs on the same queue: second should be skipped while first runs."""
+        scheduler._db.create_job(Job(
+            name="slow-job",
+            cron_expression="* * * * *",
+            command="sleep 5",
+            queue_name="serial",
+        ))
+        scheduler._db.create_job(Job(
+            name="fast-job",
+            cron_expression="* * * * *",
+            command="echo done",
+            queue_name="serial",
+        ))
+
+        await scheduler._tick()
+        # Only the first due job should have launched.
+        assert len(scheduler._running_tasks) == 1
+        assert "job-slow-job" in [t.get_name() for t in scheduler._running_tasks.values()]
+
+        # A "skipped" message should have been emitted for the blocked job.
+        msgs = scheduler._db.query_messages()
+        skipped = [m for m in msgs if '"skipped"' in m.payload]
+        assert len(skipped) == 1
+        assert "fast-job" in skipped[0].payload
+
+        # Clean up.
+        for t in scheduler._running_tasks.values():
+            t.cancel()
+        await asyncio.gather(*scheduler._running_tasks.values(), return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_different_queues_run_concurrently(self, scheduler):
+        """Jobs on different queues should run concurrently."""
+        output = json.dumps({"consumer": None, "message": "ok"})
+        scheduler._db.create_job(Job(
+            name="queue-a-job",
+            cron_expression="* * * * *",
+            command=f"echo '{output}'",
+            queue_name="queue-a",
+        ))
+        scheduler._db.create_job(Job(
+            name="queue-b-job",
+            cron_expression="* * * * *",
+            command=f"echo '{output}'",
+            queue_name="queue-b",
+        ))
+
+        await scheduler._tick()
+        assert len(scheduler._running_tasks) == 2
+
+        await asyncio.gather(*scheduler._running_tasks.values())
+
+    @pytest.mark.asyncio
+    async def test_default_queue(self, scheduler):
+        """Jobs without explicit queue_name should use 'default'."""
+        job = scheduler._db.create_job(Job(
+            name="default-queue-job",
+            cron_expression="* * * * *",
+            command="sleep 5",
+        ))
+        fetched = scheduler._db.get_job(job.id)
+        assert fetched.queue_name == "default"
+
+        # Clean up after tick.
+        await scheduler._tick()
+        for t in scheduler._running_tasks.values():
+            t.cancel()
+        await asyncio.gather(*scheduler._running_tasks.values(), return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_queue_frees_after_completion(self, scheduler):
+        """After a job completes, its queue should be free for the next tick."""
+        output = json.dumps({"consumer": None, "message": "ok"})
+        scheduler._db.create_job(Job(
+            name="job-1",
+            cron_expression="* * * * *",
+            command=f"echo '{output}'",
+            queue_name="serial",
+        ))
+        scheduler._db.create_job(Job(
+            name="job-2",
+            cron_expression="* * * * *",
+            command=f"echo '{output}'",
+            queue_name="serial",
+        ))
+
+        # First tick: job-1 runs, job-2 skipped.
+        await scheduler._tick()
+        assert len(scheduler._running_tasks) == 1
+        await asyncio.gather(*scheduler._running_tasks.values())
+
+        # Second tick: job-1 done, queue free, both should be eligible
+        # but only one can run per queue per tick.
+        await scheduler._tick()
+        running_names = [t.get_name() for t in scheduler._running_tasks.values() if not t.done()]
+        assert len(running_names) == 1
+
+        await asyncio.gather(*scheduler._running_tasks.values(), return_exceptions=True)
+
+
 class TestSchemaVersionCheck:
     @pytest.mark.asyncio
     async def test_run_checks_schema(self, tmp_path):

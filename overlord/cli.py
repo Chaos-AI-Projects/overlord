@@ -150,9 +150,9 @@ def _print_job_table(raw: str) -> None:
         return
 
     # Table header
-    fmt = "{:<5} {:<25} {:<20} {:<10} {:<20}"
-    print(fmt.format("ID", "NAME", "CRON", "STATUS", "CONSUMES"))
-    print("-" * 82)
+    fmt = "{:<5} {:<25} {:<20} {:<10} {:<12} {:<20}"
+    print(fmt.format("ID", "NAME", "CRON", "STATUS", "QUEUE", "CONSUMES"))
+    print("-" * 94)
     for j in jobs:
         consumes = ", ".join(j.get("consumes", []))
         print(fmt.format(
@@ -160,6 +160,7 @@ def _print_job_table(raw: str) -> None:
             j.get("name", "")[:25],
             j.get("cron_expression", "")[:20],
             j.get("status", ""),
+            j.get("queue_name", "default")[:12],
             consumes[:20] if consumes else "-",
         ))
 
@@ -181,6 +182,9 @@ def _print_job_status(raw: str) -> None:
     print(f"Status:   {data.get('status')}")
     print(f"Cron:     {data.get('cron_expression')}")
     print(f"Command:  {data.get('command')}")
+    queue = data.get("queue_name", "default")
+    if queue != "default":
+        print(f"Queue:    {queue}")
     consumes = data.get("consumes", [])
     if consumes:
         print(f"Consumes: {', '.join(consumes)}")
@@ -330,6 +334,8 @@ def cmd_register(args: argparse.Namespace) -> None:
         arguments["retry_delay_seconds"] = args.retry_delay
     if args.consumes:
         arguments["consumes"] = args.consumes
+    if args.queue:
+        arguments["queue_name"] = args.queue
 
     raw = asyncio.run(_call_tool(args.mcp_url, "register_job", arguments))
     data = json.loads(raw)
@@ -356,6 +362,8 @@ def cmd_update(args: argparse.Namespace) -> None:
         arguments["retry_delay_seconds"] = args.retry_delay
     if args.consumes is not None:
         arguments["consumes"] = args.consumes
+    if args.queue is not None:
+        arguments["queue_name"] = args.queue
 
     if len(arguments) == 1:
         print("Error: no fields to update. Provide at least one option.", file=sys.stderr)
@@ -477,6 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--retries", type=int, metavar="N", help="Max retries")
     p_reg.add_argument("--retry-delay", type=int, metavar="SEC", help="Delay between retries in seconds")
     p_reg.add_argument("--consumes", metavar="NAMES", help="Comma-separated consumer names or '*' for catch-all")
+    p_reg.add_argument("--queue", metavar="NAME", help="Execution queue name (default: 'default')")
     p_reg.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
     p_reg.set_defaults(func=cmd_register)
 
@@ -490,6 +499,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_upd.add_argument("--retries", type=int, metavar="N", help="New max retries")
     p_upd.add_argument("--retry-delay", type=int, metavar="SEC", help="New retry delay in seconds")
     p_upd.add_argument("--consumes", metavar="NAMES", help="New consumer names (comma-separated, empty to clear)")
+    p_upd.add_argument("--queue", metavar="NAME", help="New execution queue name")
     p_upd.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
     p_upd.set_defaults(func=cmd_update)
 

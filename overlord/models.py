@@ -33,6 +33,7 @@ class Job:
     max_retries: int = 0
     retry_delay_seconds: int = 0
     consumes: list[str] = field(default_factory=list)
+    queue_name: str = "default"
     id: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

@@ -27,6 +27,7 @@ def _job_to_dict(job: Job) -> dict:
         "max_retries": job.max_retries,
         "retry_delay_seconds": job.retry_delay_seconds,
         "consumes": job.consumes,
+        "queue_name": job.queue_name,
         "created_at": str(job.created_at) if job.created_at else None,
         "updated_at": str(job.updated_at) if job.updated_at else None,
     }
@@ -110,6 +111,7 @@ def create_mcp_server(
         max_retries: int = 0,
         retry_delay_seconds: int = 0,
         consumes: Optional[str] = None,
+        queue_name: str = "default",
     ) -> str:
         """Register a new repeatable job.
 
@@ -133,6 +135,10 @@ def create_mcp_server(
             Comma-separated consumer names this job listens to, or ``"*"``
             for catch-all.  Empty or omitted means the job runs
             unconditionally on its cron schedule.
+        queue_name : str
+            Execution queue name (default ``"default"``).  Only one job
+            runs per queue at a time; others are skipped until the queue
+            is free.
 
         Returns
         -------
@@ -152,6 +158,7 @@ def create_mcp_server(
             max_retries=max_retries,
             retry_delay_seconds=retry_delay_seconds,
             consumes=consumes_list,
+            queue_name=queue_name,
         )
         try:
             created = db.create_job(job)
@@ -191,6 +198,7 @@ def create_mcp_server(
         max_retries: Optional[int] = None,
         retry_delay_seconds: Optional[int] = None,
         consumes: Optional[str] = None,
+        queue_name: Optional[str] = None,
     ) -> str:
         """Update an existing job's parameters.
 
@@ -215,6 +223,8 @@ def create_mcp_server(
         consumes : str, optional
             New comma-separated consumer names, or ``"*"`` for catch-all.
             Pass empty string to clear.
+        queue_name : str, optional
+            New execution queue name.
 
         Returns
         -------
@@ -239,6 +249,8 @@ def create_mcp_server(
             job.retry_delay_seconds = retry_delay_seconds
         if consumes is not None:
             job.consumes = [c.strip() for c in consumes.split(",") if c.strip()] if consumes else []
+        if queue_name is not None:
+            job.queue_name = queue_name
 
         db.update_job(job)
         logger.info("Updated job %r (id=%s)", name, job.id)

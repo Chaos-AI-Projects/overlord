@@ -20,7 +20,7 @@ DEFAULT_DB_PATH = Path(
     os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
 ) / "overlord" / "overlord.db"
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     max_retries INTEGER NOT NULL DEFAULT 0,
     retry_delay_seconds INTEGER NOT NULL DEFAULT 0,
     consumes TEXT NOT NULL DEFAULT '[]',
+    queue_name TEXT NOT NULL DEFAULT 'default',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -107,6 +108,9 @@ MIGRATIONS = {
         "ALTER TABLE jobs ADD COLUMN consumes TEXT NOT NULL DEFAULT '[]'",
         # New index for consumer lookups.
         "CREATE INDEX IF NOT EXISTS idx_messages_consumer ON messages(consumer)",
+    ],
+    7: [
+        "ALTER TABLE jobs ADD COLUMN queue_name TEXT NOT NULL DEFAULT 'default'",
     ],
     6: [
         # Make source_job_id nullable so CLI-injected messages have no source job.
@@ -262,11 +266,11 @@ class Database:
         consumes_json = json.dumps(job.consumes)
         cur = self.conn.execute(
             "INSERT INTO jobs (name, cron_expression, command, status, exclusive_lock, "
-            "timeout_seconds, max_retries, retry_delay_seconds, consumes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "timeout_seconds, max_retries, retry_delay_seconds, consumes, queue_name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (job.name, job.cron_expression, job.command, job.status.value,
              job.exclusive_lock, job.timeout_seconds, job.max_retries,
-             job.retry_delay_seconds, consumes_json),
+             job.retry_delay_seconds, consumes_json, job.queue_name),
         )
         self.conn.commit()
         job.id = cur.lastrowid
@@ -298,10 +302,10 @@ class Database:
         self.conn.execute(
             "UPDATE jobs SET name=?, cron_expression=?, command=?, status=?, "
             "exclusive_lock=?, timeout_seconds=?, max_retries=?, "
-            "retry_delay_seconds=?, consumes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            "retry_delay_seconds=?, consumes=?, queue_name=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (job.name, job.cron_expression, job.command, job.status.value,
              job.exclusive_lock, job.timeout_seconds, job.max_retries,
-             job.retry_delay_seconds, consumes_json, job.id),
+             job.retry_delay_seconds, consumes_json, job.queue_name, job.id),
         )
         self.conn.commit()
 
@@ -557,6 +561,7 @@ class Database:
             max_retries=row["max_retries"],
             retry_delay_seconds=row["retry_delay_seconds"],
             consumes=consumes,
+            queue_name=row["queue_name"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

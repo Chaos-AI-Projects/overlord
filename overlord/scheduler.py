@@ -23,7 +23,7 @@ from .cron import CronExpression
 from .database import Database
 from .executor import run_job
 from .mcp_server import create_mcp_server
-from .models import JobStatus
+from .models import Job, JobStatus, Message
 
 logger = logging.getLogger("overlord.scheduler")
 
@@ -49,6 +49,7 @@ class Scheduler:
         self._stop_event = asyncio.Event()
         self._cancel_event = asyncio.Event()
         self._running_tasks: dict[int, asyncio.Task] = {}
+        self._queue_tasks: dict[int, tuple[str, asyncio.Task]] = {}
         self._cwd = Path.cwd()
         self._mcp_server = None
         self._mcp_task: Optional[asyncio.Task] = None
@@ -118,6 +119,14 @@ class Scheduler:
         logger.info("Received %s, initiating shutdown", sig.name)
         self._stop_event.set()
 
+    def _active_queue_names(self) -> set[str]:
+        """Return the set of queue names that currently have a running task."""
+        active: set[str] = set()
+        for jid, (queue, task) in self._queue_tasks.items():
+            if not task.done():
+                active.add(queue)
+        return active
+
     async def _tick(self) -> None:
         """Evaluate all enabled jobs and launch those that are due."""
         now = datetime.now()
@@ -131,6 +140,11 @@ class Scheduler:
                 logger.error(
                     "job_id=%d task raised: %s", jid, task.exception(),
                 )
+        finished_q = [jid for jid, (q, t) in self._queue_tasks.items() if t.done()]
+        for jid in finished_q:
+            self._queue_tasks.pop(jid)
+
+        busy_queues = self._active_queue_names()
 
         for job in jobs:
             try:
@@ -150,6 +164,16 @@ class Scheduler:
                 logger.debug("job=%s already running, skipping", job.name)
                 continue
 
+            # Queue gate: if the job's queue already has a running job, skip
+            # and emit a "skipped" message with no consumer.
+            if job.queue_name in busy_queues:
+                logger.info(
+                    "job=%s queue=%s busy, skipping tick",
+                    job.name, job.queue_name,
+                )
+                self._emit_skipped_message(job)
+                continue
+
             # Consumer gate: if the job has a non-empty consumes list, check
             # for matching unconsumed messages.  Skip if none exist.
             input_messages = None
@@ -164,12 +188,26 @@ class Scheduler:
                     )
                     continue
 
-            logger.info("job=%s is due, launching", job.name)
+            logger.info("job=%s is due, launching (queue=%s)", job.name, job.queue_name)
             task = asyncio.create_task(
                 self._run_consumer_job(job, input_messages),
                 name=f"job-{job.name}",
             )
             self._running_tasks[job.id] = task
+            self._queue_tasks[job.id] = (job.queue_name, task)
+            busy_queues.add(job.queue_name)
+
+    def _emit_skipped_message(self, job: Job) -> None:
+        """Emit a message with no consumer indicating the job was skipped."""
+        import json
+        payload = json.dumps({
+            "job_name": job.name,
+            "job_id": job.id,
+            "status": "skipped",
+            "reason": f"queue '{job.queue_name}' is busy",
+        })
+        self._db.create_message(job.id, payload)
+        logger.debug("job=%s emitted skipped message", job.name)
 
     async def _run_consumer_job(self, job, input_messages) -> None:
         """Run a job and auto-mark consumed messages on success."""

@@ -108,6 +108,23 @@ class TestJobCRUD:
         fetched = db.get_job(job.id)
         assert fetched.consumes == ["*"]
 
+    def test_queue_name_default(self, db):
+        job = db.create_job(make_job())
+        fetched = db.get_job(job.id)
+        assert fetched.queue_name == "default"
+
+    def test_queue_name_custom(self, db):
+        job = db.create_job(make_job(queue_name="serial"))
+        fetched = db.get_job(job.id)
+        assert fetched.queue_name == "serial"
+
+    def test_update_queue_name(self, db):
+        job = db.create_job(make_job())
+        job.queue_name = "priority"
+        db.update_job(job)
+        fetched = db.get_job(job.id)
+        assert fetched.queue_name == "priority"
+
 
 class TestExecutionHistory:
     def test_create_and_finish(self, db):
