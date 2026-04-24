@@ -116,6 +116,32 @@ class TestBuildParser:
         args = parser.parse_args(["messages", "--text"])
         assert args.text is True
 
+    def test_messages_json_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["messages", "--json"])
+        assert args.json is True
+        assert args.text is False
+
+    def test_messages_text_json_mutually_exclusive(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["messages", "--text", "--json"])
+
+    def test_messages_consume_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["messages", "--consume"])
+        assert args.consume is True
+
+    def test_messages_no_consumer_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["messages", "--no-consumer"])
+        assert args.no_consumer is True
+
+    def test_messages_consumer_no_consumer_mutually_exclusive(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["messages", "--consumer", "x", "--no-consumer"])
+
     def test_messages_with_filters(self):
         parser = build_parser()
         args = parser.parse_args([
@@ -440,6 +466,52 @@ class TestCommandHandlers:
         out = capsys.readouterr().out
         assert "--- Message 1 ---" in out
         assert "hello" in out
+
+    @mock.patch("overlord.cli._call_tool")
+    def test_cmd_messages_json_flag(self, mock_call, capsys):
+        messages = [{"id": 1, "source_job_name": "my-job", "consumed": False,
+                     "consumer": "agent", "created_at": "2026-01-01",
+                     "payload": {"key": "val"}}]
+        mock_call.return_value = json.dumps(messages)
+        args = build_parser().parse_args(["messages", "--json"])
+        cmd_messages(args)
+        out = capsys.readouterr().out
+        parsed = json.loads(out)
+        assert len(parsed) == 1
+        assert parsed[0]["payload"]["key"] == "val"
+
+    @mock.patch("overlord.cli._call_tool")
+    def test_cmd_messages_json_empty(self, mock_call, capsys):
+        mock_call.return_value = "[]"
+        args = build_parser().parse_args(["messages", "--json"])
+        cmd_messages(args)
+        out = capsys.readouterr().out
+        assert json.loads(out) == []
+
+    @mock.patch("overlord.cli._call_tool")
+    def test_cmd_messages_consume_flag(self, mock_call, capsys):
+        messages = [{"id": 1, "source_job_name": "my-job", "consumed": True,
+                     "consumer": None, "created_at": "2026-01-01"}]
+        mock_call.return_value = json.dumps(messages)
+        args = build_parser().parse_args(["messages", "--consume"])
+        cmd_messages(args)
+        assert mock_call.call_args[0][1] == "consume_messages"
+
+    @mock.patch("overlord.cli._call_tool")
+    def test_cmd_messages_consume_strips_unconsumed(self, mock_call, capsys):
+        mock_call.return_value = "[]"
+        args = build_parser().parse_args(["messages", "--consume", "--unconsumed"])
+        cmd_messages(args)
+        call_args = mock_call.call_args[0][2]
+        assert "unconsumed" not in call_args
+
+    @mock.patch("overlord.cli._call_tool")
+    def test_cmd_messages_no_consumer_flag(self, mock_call, capsys):
+        mock_call.return_value = "[]"
+        args = build_parser().parse_args(["messages", "--no-consumer"])
+        cmd_messages(args)
+        call_args = mock_call.call_args[0][2]
+        assert call_args["no_consumer"] is True
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_update(self, mock_call, capsys):

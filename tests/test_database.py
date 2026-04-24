@@ -344,6 +344,24 @@ class TestQueryMessages:
         results = db.query_messages(source_job_name="ghost")
         assert len(results) == 0
 
+    def test_query_no_consumer(self, db):
+        job = db.create_job(make_job())
+        db.create_message(job.id, "unaddressed")
+        db.create_message(job.id, "addressed", consumer="agent")
+        results = db.query_messages(no_consumer=True)
+        assert len(results) == 1
+        assert results[0].consumer is None
+
+    def test_query_no_consumer_with_other_filters(self, db):
+        j1 = db.create_job(make_job(name="job-a"))
+        j2 = db.create_job(make_job(name="job-b"))
+        db.create_message(j1.id, "match")
+        db.create_message(j1.id, "has-consumer", consumer="x")
+        db.create_message(j2.id, "wrong-job")
+        results = db.query_messages(source_job_name="job-a", no_consumer=True)
+        assert len(results) == 1
+        assert results[0].payload == "match"
+
 
 class TestCascadeDeletes:
     def test_delete_job_cascades_execution(self, db):

@@ -71,8 +71,8 @@ def _print_json(raw: str) -> None:
         print(raw)
 
 
-def _print_messages(raw: str, text: bool = False) -> None:
-    """Print a list of messages as a human-readable table or full text."""
+def _print_messages(raw: str, text: bool = False, as_json: bool = False) -> None:
+    """Print a list of messages as a human-readable table, full text, or JSON."""
     try:
         messages = json.loads(raw)
     except json.JSONDecodeError:
@@ -84,7 +84,14 @@ def _print_messages(raw: str, text: bool = False) -> None:
         sys.exit(1)
 
     if not messages:
-        print("No messages found.")
+        if as_json:
+            print("[]")
+        else:
+            print("No messages found.")
+        return
+
+    if as_json:
+        print(json.dumps(messages))
         return
 
     if text:
@@ -431,13 +438,22 @@ def cmd_messages(args: argparse.Namespace) -> None:
         arguments["source_job_name"] = args.job
     if args.consumer:
         arguments["consumer"] = args.consumer
+    if args.no_consumer:
+        arguments["no_consumer"] = True
     if args.unconsumed:
         arguments["unconsumed"] = True
     if args.limit is not None:
         arguments["limit"] = args.limit
 
-    raw = asyncio.run(_call_tool(args.mcp_url, "query_messages", arguments))
-    _print_messages(raw, text=args.text)
+    if args.consume:
+        tool_name = "consume_messages"
+        # consume_messages doesn't use unconsumed flag (always unconsumed)
+        arguments.pop("unconsumed", None)
+    else:
+        tool_name = "query_messages"
+
+    raw = asyncio.run(_call_tool(args.mcp_url, tool_name, arguments))
+    _print_messages(raw, text=args.text, as_json=args.json)
 
 
 # -- Argument parser --
@@ -525,10 +541,15 @@ def build_parser() -> argparse.ArgumentParser:
     # messages
     p_msg = sub.add_parser("messages", help="Query messages")
     p_msg.add_argument("--job", metavar="NAME", help="Filter by source job name")
-    p_msg.add_argument("--consumer", metavar="NAME", help="Filter by consumer tag")
+    consumer_group = p_msg.add_mutually_exclusive_group()
+    consumer_group.add_argument("--consumer", metavar="NAME", help="Filter by consumer tag")
+    consumer_group.add_argument("--no-consumer", action="store_true", help="Show only messages without a consumer")
     p_msg.add_argument("--unconsumed", action="store_true", help="Show only unconsumed messages")
+    p_msg.add_argument("--consume", action="store_true", help="Consume all matching unconsumed messages")
     p_msg.add_argument("--limit", type=int, metavar="N", help="Maximum number of results")
-    p_msg.add_argument("--text", action="store_true", help="Print full message contents in plain-text format")
+    output_group = p_msg.add_mutually_exclusive_group()
+    output_group.add_argument("--text", action="store_true", help="Print full message contents in plain-text format")
+    output_group.add_argument("--json", action="store_true", help="Print messages as JSON array")
     p_msg.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
     p_msg.set_defaults(func=cmd_messages)
 

@@ -308,6 +308,7 @@ def create_mcp_server(
         source_job_name: Optional[str] = None,
         consumer: Optional[str] = None,
         unconsumed: Optional[bool] = None,
+        no_consumer: bool = False,
         limit: int = 20,
     ) -> str:
         """Query messages with optional filters.
@@ -320,6 +321,8 @@ def create_mcp_server(
             Filter by consumer tag.
         unconsumed : bool, optional
             If true, return only unconsumed messages. If false, only consumed.
+        no_consumer : bool
+            If true, return only messages where consumer is NULL (unaddressed).
         limit : int
             Maximum number of results (default 20).
 
@@ -335,6 +338,7 @@ def create_mcp_server(
             source_job_name=source_job_name,
             consumer=consumer,
             consumed=consumed,
+            no_consumer=no_consumer,
             limit=limit,
         )
         # Build job id→name map for the result set
@@ -365,6 +369,73 @@ def create_mcp_server(
                 "created_at": str(msg.created_at) if msg.created_at else None,
                 "consumed_at": str(msg.consumed_at) if msg.consumed_at else None,
             })
+        return json.dumps(result)
+
+    @mcp.tool()
+    def consume_messages(
+        source_job_name: Optional[str] = None,
+        consumer: Optional[str] = None,
+        no_consumer: bool = False,
+        limit: int = 20,
+    ) -> str:
+        """Consume matching unconsumed messages, marking them as consumed.
+
+        Queries unconsumed messages using the same filters as ``query_messages``,
+        marks them all as consumed, and returns the consumed messages.
+
+        Parameters
+        ----------
+        source_job_name : str, optional
+            Filter by originating job name.
+        consumer : str, optional
+            Filter by consumer tag.
+        no_consumer : bool
+            If true, match only messages where consumer is NULL (unaddressed).
+        limit : int
+            Maximum number of messages to consume (default 20).
+
+        Returns
+        -------
+        str
+            JSON array of the consumed message objects.
+        """
+        messages = db.query_messages(
+            source_job_name=source_job_name,
+            consumer=consumer,
+            consumed=False,
+            no_consumer=no_consumer,
+            limit=limit,
+        )
+        if messages:
+            db.mark_consumed_bulk([m.id for m in messages])
+        # Build result in the same format as query_messages
+        job_name_cache: dict[int, str] = {}
+        result = []
+        for msg in messages:
+            payload = msg.payload
+            try:
+                payload = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            if msg.source_job_id is None:
+                job_name = "(cli)"
+            else:
+                job_name = job_name_cache.get(msg.source_job_id)
+                if job_name is None:
+                    job = db.get_job(msg.source_job_id)
+                    job_name = job.name if job else None
+                    job_name_cache[msg.source_job_id] = job_name
+            result.append({
+                "id": msg.id,
+                "source_job_id": msg.source_job_id,
+                "source_job_name": job_name,
+                "payload": payload,
+                "consumer": msg.consumer,
+                "consumed": True,
+                "created_at": str(msg.created_at) if msg.created_at else None,
+                "consumed_at": str(msg.consumed_at) if msg.consumed_at else None,
+            })
+        logger.info("Consumed %d messages", len(result))
         return json.dumps(result)
 
     @mcp.tool()

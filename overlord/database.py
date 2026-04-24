@@ -414,6 +414,7 @@ class Database:
         source_job_name: Optional[str] = None,
         consumer: Optional[str] = None,
         consumed: Optional[bool] = None,
+        no_consumer: bool = False,
         limit: int = 20,
     ) -> list[Message]:
         """Query messages with optional filters.
@@ -426,6 +427,8 @@ class Database:
             Filter by consumer tag (exact match on the consumer column).
         consumed : bool, optional
             Filter consumed (True) vs unconsumed (False) messages.
+        no_consumer : bool
+            If True, filter to messages where consumer IS NULL.
         limit : int
             Maximum number of results (default 20).
         """
@@ -438,7 +441,9 @@ class Database:
             )
             params.append(source_job_name)
 
-        if consumer is not None:
+        if no_consumer:
+            clauses.append("consumer IS NULL")
+        elif consumer is not None:
             clauses.append("consumer = ?")
             params.append(consumer)
 

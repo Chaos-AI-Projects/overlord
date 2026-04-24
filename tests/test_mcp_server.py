@@ -471,3 +471,47 @@ class TestToolsIntegration:
         assert result[0]["source_job_id"] is None
         assert result[0]["source_job_name"] == "(cli)"
         db.close()
+
+    def test_query_messages_no_consumer(self, tools):
+        tool_map, db = tools
+        tool_map["register_job"](name="nc-job", cron_expression="* * * * *", command="echo x")
+        job = db.get_job_by_name("nc-job")
+        db.create_message(job.id, "unaddressed")
+        db.create_message(job.id, "addressed", consumer="agent")
+        result = json.loads(tool_map["query_messages"](no_consumer=True))
+        assert len(result) == 1
+        assert result[0]["consumer"] is None
+        db.close()
+
+    def test_consume_messages(self, tools):
+        tool_map, db = tools
+        tool_map["register_job"](name="cm-job", cron_expression="* * * * *", command="echo y")
+        job = db.get_job_by_name("cm-job")
+        db.create_message(job.id, '{"data": 1}', consumer="agent")
+        db.create_message(job.id, '{"data": 2}', consumer="agent")
+        db.create_message(job.id, '{"data": 3}', consumer="logger")
+        result = json.loads(tool_map["consume_messages"](consumer="agent"))
+        assert len(result) == 2
+        assert all(r["consumed"] is True for r in result)
+        # Verify they are actually consumed in DB
+        remaining = db.fetch_unconsumed_for_consumers(["agent"])
+        assert len(remaining) == 0
+        # logger message should still be unconsumed
+        logger_msgs = db.fetch_unconsumed_for_consumers(["logger"])
+        assert len(logger_msgs) == 1
+        db.close()
+
+    def test_consume_messages_empty(self, tools):
+        tool_map, db = tools
+        result = json.loads(tool_map["consume_messages"]())
+        assert result == []
+        db.close()
+
+    def test_consume_messages_no_consumer(self, tools):
+        tool_map, db = tools
+        tool_map["send_message"](payload="unaddressed1")
+        tool_map["send_message"](payload="addressed1", consumer="x")
+        result = json.loads(tool_map["consume_messages"](no_consumer=True))
+        assert len(result) == 1
+        assert result[0]["consumer"] is None
+        db.close()
