@@ -71,8 +71,8 @@ def _print_json(raw: str) -> None:
         print(raw)
 
 
-def _print_messages(raw: str, text: bool = False, as_json: bool = False) -> None:
-    """Print a list of messages as a human-readable table, full text, or JSON."""
+def _print_messages(raw: str, text: bool = False, as_jsonl: bool = False) -> None:
+    """Print a list of messages as a human-readable table, full text, or JSONL."""
     try:
         messages = json.loads(raw)
     except json.JSONDecodeError:
@@ -84,14 +84,13 @@ def _print_messages(raw: str, text: bool = False, as_json: bool = False) -> None
         sys.exit(1)
 
     if not messages:
-        if as_json:
-            print("[]")
-        else:
+        if not as_jsonl:
             print("No messages found.")
         return
 
-    if as_json:
-        print(json.dumps(messages))
+    if as_jsonl:
+        for msg in messages:
+            print(json.dumps(msg))
         return
 
     if text:
@@ -453,7 +452,7 @@ def cmd_messages(args: argparse.Namespace) -> None:
         tool_name = "query_messages"
 
     raw = asyncio.run(_call_tool(args.mcp_url, tool_name, arguments))
-    _print_messages(raw, text=args.text, as_json=args.json)
+    _print_messages(raw, text=args.text, as_jsonl=args.jsonl)
 
 
 # -- Argument parser --
@@ -549,7 +548,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_msg.add_argument("--limit", type=int, metavar="N", help="Maximum number of results")
     output_group = p_msg.add_mutually_exclusive_group()
     output_group.add_argument("--text", action="store_true", help="Print full message contents in plain-text format")
-    output_group.add_argument("--json", action="store_true", help="Print messages as JSON array")
+    output_group.add_argument("--jsonl", action="store_true", help="Print messages as JSON Lines (one object per line)")
     p_msg.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
     p_msg.set_defaults(func=cmd_messages)
 
