@@ -49,6 +49,8 @@
       pkgs.curl
       pkgs.cacert        # TLS certs for curl
       pkgs.procps        # ps, top, etc.
+      pkgs.gh            # GitHub CLI
+      pkgs.nodejs        # Node.js LTS
     ];
 
     binPath = lib.makeBinPath runtimePackages;
@@ -73,6 +75,7 @@
     container = pkgs.dockerTools.buildLayeredImage {
       name = "overlord";
       tag = "latest";
+      maxLayers = 32;
 
       contents = runtimePackages;
 
