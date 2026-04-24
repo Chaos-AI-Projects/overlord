@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from io import StringIO
 from unittest import mock
 
@@ -274,7 +275,9 @@ class TestPrintMessages:
 
 
 class TestPrintMessagesText:
-    def test_single_message_with_dict_payload(self, capsys):
+    def test_single_message_with_dict_payload(self, capsys, monkeypatch):
+        monkeypatch.setenv("TZ", "UTC")
+        time.tzset()
         messages = [
             {"id": 42, "source_job_name": "my-job", "consumed": False,
              "consumer": "worker-1", "created_at": "2026-04-22 11:48:16",
