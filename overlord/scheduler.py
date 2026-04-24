@@ -163,21 +163,19 @@ class Scheduler:
     def _drain_pending_queue(self, queue_name: str) -> None:
         """Launch the next pending job for a queue, if any."""
         pending = self._pending_queues.get(queue_name)
-        if not pending:
+        while pending:
+            job, input_messages = pending.pop(0)
+            # Re-check consumer gate: messages may have been consumed since enqueue.
+            if job.consumes:
+                input_messages = self._db.fetch_unconsumed_for_consumers(job.consumes)
+                if not input_messages:
+                    logger.debug(
+                        "job=%s dequeued but no unconsumed messages, dropping",
+                        job.name,
+                    )
+                    continue
+            self._launch_job(job, input_messages)
             return
-        job, input_messages = pending.pop(0)
-        # Re-check consumer gate: messages may have been consumed since enqueue.
-        if job.consumes:
-            input_messages = self._db.fetch_unconsumed_for_consumers(job.consumes)
-            if not input_messages:
-                logger.debug(
-                    "job=%s dequeued but no unconsumed messages, dropping",
-                    job.name,
-                )
-                # Try next in queue.
-                self._drain_pending_queue(queue_name)
-                return
-        self._launch_job(job, input_messages)
 
     async def _tick(self) -> None:
         """Evaluate all enabled jobs and launch those that are due."""
