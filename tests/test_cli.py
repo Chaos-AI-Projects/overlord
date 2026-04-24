@@ -494,17 +494,22 @@ class TestCommandHandlers:
         messages = [{"id": 1, "source_job_name": "my-job", "consumed": True,
                      "consumer": None, "created_at": "2026-01-01"}]
         mock_call.return_value = json.dumps(messages)
-        args = build_parser().parse_args(["messages", "--consume"])
+        args = build_parser().parse_args(["messages", "--consume", "--no-consumer"])
         cmd_messages(args)
         assert mock_call.call_args[0][1] == "consume_messages"
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_messages_consume_strips_unconsumed(self, mock_call, capsys):
         mock_call.return_value = "[]"
-        args = build_parser().parse_args(["messages", "--consume", "--unconsumed"])
+        args = build_parser().parse_args(["messages", "--consume", "--unconsumed", "--no-consumer"])
         cmd_messages(args)
         call_args = mock_call.call_args[0][2]
         assert "unconsumed" not in call_args
+
+    def test_cmd_messages_consume_requires_consumer_filter(self, capsys):
+        args = build_parser().parse_args(["messages", "--consume"])
+        with pytest.raises(SystemExit):
+            cmd_messages(args)
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_messages_no_consumer_flag(self, mock_call, capsys):

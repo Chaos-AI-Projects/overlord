@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -408,6 +409,7 @@ def create_mcp_server(
         )
         if messages:
             db.mark_consumed_bulk([m.id for m in messages])
+        consumed_at_str = str(datetime.now()) if messages else None
         # Build result in the same format as query_messages
         job_name_cache: dict[int, str] = {}
         result = []
@@ -433,7 +435,7 @@ def create_mcp_server(
                 "consumer": msg.consumer,
                 "consumed": True,
                 "created_at": str(msg.created_at) if msg.created_at else None,
-                "consumed_at": str(msg.consumed_at) if msg.consumed_at else None,
+                "consumed_at": consumed_at_str,
             })
         logger.info("Consumed %d messages", len(result))
         return json.dumps(result)

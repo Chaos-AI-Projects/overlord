@@ -445,6 +445,9 @@ def cmd_messages(args: argparse.Namespace) -> None:
         arguments["limit"] = args.limit
 
     if args.consume:
+        if not args.consumer and not args.no_consumer:
+            print("Error: --consume requires --consumer or --no-consumer", file=sys.stderr)
+            sys.exit(1)
         tool_name = "consume_messages"
         # consume_messages doesn't use unconsumed flag (always unconsumed)
         arguments.pop("unconsumed", None)

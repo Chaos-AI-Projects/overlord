@@ -493,6 +493,7 @@ class TestToolsIntegration:
         result = json.loads(tool_map["consume_messages"](consumer="agent"))
         assert len(result) == 2
         assert all(r["consumed"] is True for r in result)
+        assert all(r["consumed_at"] is not None for r in result)
         # Verify they are actually consumed in DB
         remaining = db.fetch_unconsumed_for_consumers(["agent"])
         assert len(remaining) == 0
