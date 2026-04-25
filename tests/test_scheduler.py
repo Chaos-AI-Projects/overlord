@@ -138,13 +138,12 @@ class TestSchedulerConsumes:
             command=f"echo '{output}'",
             consumes=["producer"],
         ))
-        # Create a message addressed to this consumer.
-        producer = scheduler._db.create_job(Job(
-            name="producer",
-            cron_expression="0 0 1 1 *",
-            command="echo nope",
-        ))
-        scheduler._db.create_message(producer.id, '{"data": 1}', consumer="producer")
+        # Deliver a message to the "producer" Maildir so the consumer gate opens.
+        from overlord.maildir import MaildirStore
+        msg = MaildirStore.build_message(
+            payload='{"data": 1}', consumer="producer", job_name="producer",
+        )
+        scheduler._maildir.deliver(msg, consumer="producer")
 
         await scheduler._tick()
         assert len(scheduler._running_tasks) == 1
@@ -152,8 +151,8 @@ class TestSchedulerConsumes:
         # Wait for the task to complete.
         await asyncio.gather(*scheduler._running_tasks.values())
 
-        # The message should be auto-consumed on success.
-        remaining = scheduler._db.fetch_unconsumed_for_consumers(["producer"])
+        # The message should be auto-consumed (moved to processed).
+        remaining = scheduler._maildir.fetch_unconsumed_for_consumers(["producer"])
         assert len(remaining) == 0
 
     @pytest.mark.asyncio
@@ -166,24 +165,21 @@ class TestSchedulerConsumes:
             command=f"echo '{output}'",
             consumes=["*"],
         ))
-        producer = scheduler._db.create_job(Job(
-            name="producer",
-            cron_expression="0 0 1 1 *",
-            command="echo nope",
-        ))
-        # Unaddressed message (consumer=None).
-        input_msg = scheduler._db.create_message(producer.id, '{"data": 1}')
+        # Unaddressed message (consumer=None) → goes to catchall Maildir.
+        from overlord.maildir import MaildirStore
+        msg = MaildirStore.build_message(
+            payload='{"data": 1}', consumer=None, job_name="producer",
+        )
+        scheduler._maildir.deliver(msg, consumer=None)
 
         await scheduler._tick()
         assert len(scheduler._running_tasks) == 1
 
         await asyncio.gather(*scheduler._running_tasks.values())
 
-        # The original input message should be consumed.
-        all_msgs = scheduler._db.query_messages()
-        original = [m for m in all_msgs if m.id == input_msg.id]
-        assert len(original) == 1
-        assert original[0].consumed is True
+        # The message should be auto-consumed (moved to processed).
+        remaining = scheduler._maildir.fetch_unconsumed_for_consumers(["*"])
+        assert len(remaining) == 0
 
     @pytest.mark.asyncio
     async def test_unconditional_job_runs_normally(self, scheduler):

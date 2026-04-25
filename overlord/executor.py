@@ -12,7 +12,7 @@ from typing import Optional
 
 from .database import Database
 from .maildir import MaildirStore
-from .models import ExecutionRecord, ExecutionStatus, Job, JobOutput, JobOutputError, Message
+from .models import ExecutionRecord, ExecutionStatus, Job, JobOutput, JobOutputError
 from .spool import SpoolWriter
 
 logger = logging.getLogger("overlord.executor")
@@ -23,7 +23,7 @@ async def run_job(
     db: Database,
     spool: SpoolWriter,
     cancel_event: Optional[asyncio.Event] = None,
-    input_messages: Optional[list[Message]] = None,
+    input_messages: Optional[list[dict]] = None,
     cwd: Optional[Path] = None,
 ) -> ExecutionRecord:
     """Execute a job's shell command, respecting locks, timeout, and retries.
@@ -33,8 +33,10 @@ async def run_job(
         db: Database handle (thread-local connections are safe here).
         cancel_event: If set, the executor will abort before starting or
             between retries.  Used for graceful shutdown.
-        input_messages: Messages to pass to the job via stdin (for consumer
-            jobs whose ``consumes`` list is non-empty).
+        input_messages: Maildir message dicts to pass to the job via stdin
+            (for consumer jobs whose ``consumes`` list is non-empty).
+            Each dict has keys: ``key``, ``consumer``, ``payload``,
+            ``subject``, ``date``.
 
     Returns:
         The final ExecutionRecord for this run.
@@ -102,7 +104,7 @@ async def _run_subprocess(
     record: ExecutionRecord,
     db: Database,
     cancel_event: Optional[asyncio.Event],
-    input_messages: Optional[list[Message]] = None,
+    input_messages: Optional[list[dict]] = None,
     cwd: Optional[Path] = None,
 ) -> ExecutionRecord:
     """Spawn the shell command and wait for it to finish (or timeout)."""
@@ -120,17 +122,16 @@ async def _run_subprocess(
 
     stdin_data = None
     if input_messages:
-        envelope = [
-            {
-                "message_id": m.id,
-                "source_job_id": m.source_job_id,
-                "payload": m.payload,
-                "consumer": m.consumer,
-                "created_at": str(m.created_at) if m.created_at else None,
-            }
-            for m in input_messages
-        ]
-        stdin_data = json.dumps(envelope).encode()
+        # Extract payload.json content from each Maildir message and
+        # concatenate into a JSON array for the consumer job's stdin.
+        payloads = []
+        for m in input_messages:
+            raw = m.get("payload", "")
+            try:
+                payloads.append(json.loads(raw))
+            except (json.JSONDecodeError, TypeError):
+                payloads.append(raw)
+        stdin_data = json.dumps(payloads).encode()
 
     timed_out = False
     try:

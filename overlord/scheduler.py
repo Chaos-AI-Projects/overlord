@@ -23,7 +23,7 @@ from typing import Optional
 from .cron import CronExpression
 from .database import Database
 from .executor import run_job
-from .maildir import MaildirStore
+from .maildir import CATCHALL, MaildirStore
 from .mcp_server import create_mcp_server
 from .models import Job, JobStatus
 from .spool import SpoolWriter
@@ -49,6 +49,7 @@ class Scheduler:
     ):
         self._db = Database(db_path)
         self._spool = SpoolWriter(data_dir=self._db.db_path.parent)
+        self._maildir = MaildirStore(data_dir=self._db.db_path.parent)
         self._tick_seconds = tick_seconds
         self._stop_event = asyncio.Event()
         self._cancel_event = asyncio.Event()
@@ -170,7 +171,7 @@ class Scheduler:
             job, input_messages = pending.pop(0)
             # Re-check consumer gate: messages may have been consumed since enqueue.
             if job.consumes:
-                input_messages = self._db.fetch_unconsumed_for_consumers(job.consumes)
+                input_messages = self._maildir.fetch_unconsumed_for_consumers(job.consumes)
                 if not input_messages:
                     logger.debug(
                         "job=%s dequeued but no unconsumed messages, dropping",
@@ -224,10 +225,10 @@ class Scheduler:
                 continue
 
             # Consumer gate: if the job has a non-empty consumes list, check
-            # for matching unconsumed messages.  Skip if none exist.
+            # for matching unconsumed messages in Maildir.  Skip if none exist.
             input_messages = None
             if job.consumes:
-                input_messages = self._db.fetch_unconsumed_for_consumers(
+                input_messages = self._maildir.fetch_unconsumed_for_consumers(
                     job.consumes,
                 )
                 if not input_messages:
@@ -261,19 +262,21 @@ class Scheduler:
         logger.debug("job=%s emitted skipped message", job.name)
 
     async def _run_consumer_job(self, job, input_messages) -> None:
-        """Run a job and auto-mark consumed messages on success."""
+        """Run a job and auto-consume Maildir messages on success."""
         record = await run_job(
             job, self._db, self._spool,
             cancel_event=self._cancel_event,
             input_messages=input_messages,
             cwd=self._cwd,
         )
-        # Auto-consume delivered messages when the job succeeds.
+        # Auto-consume delivered messages by moving them to the processed
+        # subfolder in Maildir when the job succeeds.
         if input_messages and record.status.value == "success":
-            msg_ids = [m.id for m in input_messages]
-            self._db.mark_consumed_bulk(msg_ids)
+            for m in input_messages:
+                target = m.get("consumer") or CATCHALL
+                self._maildir.consume(target, m["key"])
             logger.info(
-                "job=%s auto-consumed %d message(s)", job.name, len(msg_ids),
+                "job=%s auto-consumed %d message(s)", job.name, len(input_messages),
             )
 
     async def _shutdown(self) -> None:

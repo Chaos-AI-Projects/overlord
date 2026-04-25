@@ -129,16 +129,21 @@ class TestExecutor:
 
     @pytest.mark.asyncio
     async def test_input_messages_passed_via_stdin(self, db, spool):
-        """Consumer jobs receive input messages on stdin."""
-        from overlord.models import Message
-
+        """Consumer jobs receive Maildir message payloads on stdin."""
         job = make_job(db, command="cat")
-        msg = db.create_message(job.id, '{"data": "hello"}', consumer="test-job")
-        # Re-read to get created_at.
-        msgs = db.poll_messages()
+        # Simulate Maildir message dicts as returned by MaildirStore.fetch_messages().
+        input_messages = [
+            {
+                "key": "fake-key-1",
+                "consumer": "test-job",
+                "payload": '{"data": "hello"}',
+                "subject": "test-job 2026-01-01T00:00:00+00:00",
+                "date": "2026-01-01T00:00:00+00:00",
+            },
+        ]
 
-        record = await run_job(job, db, spool, input_messages=msgs)
-        # cat echoes stdin back — stdout should contain the messages JSON,
+        record = await run_job(job, db, spool, input_messages=input_messages)
+        # cat echoes stdin back — stdout should contain the payload JSON,
         # but the output won't be valid JobOutput schema so it'll be marked failed.
         reloaded = db.get_execution(record.id)
         assert reloaded.stdout is not None
