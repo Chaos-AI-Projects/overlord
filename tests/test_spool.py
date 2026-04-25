@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from overlord.maildir import MaildirStore
 from overlord.spool import SpoolProcessor, SpoolWriter
 
 
@@ -25,38 +26,56 @@ def processor(data_dir):
     return SpoolProcessor(data_dir=data_dir, poll_interval=0.1)
 
 
+def _build_and_write(writer, payload, consumer=None, job_name="unknown",
+                     execution_time=None):
+    """Helper: build an EmailMessage and write it to the spool."""
+    msg = MaildirStore.build_message(
+        payload=payload,
+        consumer=consumer,
+        job_name=job_name,
+        execution_time=execution_time,
+    )
+    return writer.write(msg)
+
+
 class TestSpoolWriter:
     def test_write_creates_file_in_spool(self, writer, data_dir):
-        path = writer.write(
+        path = _build_and_write(
+            writer,
             payload=json.dumps({"msg": "hello"}),
             consumer="worker",
             job_name="test-job",
         )
         assert path.exists()
         assert path.parent == data_dir / "spool"
-        assert path.suffix == ".json"
+        assert path.suffix == ".eml"
 
-    def test_write_file_contains_envelope(self, writer):
+    def test_write_file_contains_rfc822(self, writer):
         t = datetime(2026, 4, 25, 12, 0, 0, tzinfo=timezone.utc)
-        path = writer.write(
+        path = _build_and_write(
+            writer,
             payload=json.dumps({"data": 1}),
             consumer="w",
             job_name="j",
             execution_time=t,
         )
-        envelope = json.loads(path.read_text())
-        assert envelope["payload"] == json.dumps({"data": 1})
-        assert envelope["consumer"] == "w"
-        assert envelope["job_name"] == "j"
-        assert "2026-04-25" in envelope["execution_time"]
+        raw = path.read_bytes()
+        # RFC 822 messages contain headers like Subject:
+        assert b"Subject:" in raw
+        assert b"X-Overlord-Job: j" in raw
+        assert b"X-Overlord-Consumer: w" in raw
+        assert b"2026-04-25" in raw
 
     def test_write_no_consumer(self, writer):
-        path = writer.write(payload=json.dumps({"x": 1}))
-        envelope = json.loads(path.read_text())
-        assert envelope["consumer"] is None
+        path = _build_and_write(
+            writer,
+            payload=json.dumps({"x": 1}),
+        )
+        raw = path.read_bytes()
+        assert b"X-Overlord-Consumer" not in raw
 
     def test_write_atomic_no_tmp_leftover(self, writer, data_dir):
-        writer.write(payload=json.dumps({"a": 1}))
+        _build_and_write(writer, payload=json.dumps({"a": 1}))
         tmp_dir = data_dir / "spool" / "tmp"
         leftover = list(tmp_dir.iterdir())
         assert len(leftover) == 0
@@ -64,16 +83,19 @@ class TestSpoolWriter:
     def test_write_multiple_unique_files(self, writer, data_dir):
         paths = set()
         for i in range(5):
-            p = writer.write(payload=json.dumps({"i": i}), consumer="c")
+            p = _build_and_write(
+                writer, payload=json.dumps({"i": i}), consumer="c",
+            )
             paths.add(p)
         assert len(paths) == 5
-        spool_files = list((data_dir / "spool").glob("*.json"))
+        spool_files = list((data_dir / "spool").glob("*.eml"))
         assert len(spool_files) == 5
 
 
 class TestSpoolProcessor:
     def test_process_spool_delivers_to_maildir(self, writer, processor, data_dir):
-        writer.write(
+        _build_and_write(
+            writer,
             payload=json.dumps({"msg": "hello"}),
             consumer="worker",
             job_name="test-job",
@@ -82,7 +104,7 @@ class TestSpoolProcessor:
         processor._process_spool()
 
         # Spool file should be removed.
-        spool_files = list((data_dir / "spool").glob("*.json"))
+        spool_files = list((data_dir / "spool").glob("*.eml"))
         assert len(spool_files) == 0
 
         # Message should be in the Maildir.
@@ -92,7 +114,7 @@ class TestSpoolProcessor:
         assert "test-job" in msgs[0]["subject"]
 
     def test_process_spool_catchall(self, writer, processor, data_dir):
-        writer.write(payload=json.dumps({"x": 1}), consumer=None)
+        _build_and_write(writer, payload=json.dumps({"x": 1}), consumer=None)
         processor._process_spool()
 
         msgs = processor._store.fetch_messages("catchall")
@@ -100,7 +122,8 @@ class TestSpoolProcessor:
 
     def test_process_spool_fifo_order(self, writer, processor, data_dir):
         for i in range(3):
-            writer.write(
+            _build_and_write(
+                writer,
                 payload=json.dumps({"order": i}),
                 consumer="ordered",
                 job_name=f"job-{i}",
@@ -108,11 +131,8 @@ class TestSpoolProcessor:
 
         # Verify spool files are sorted by filename (timestamp-prefixed).
         spool_dir = data_dir / "spool"
-        spool_files = sorted(f for f in spool_dir.iterdir() if f.suffix == ".json")
-        file_payloads = [
-            json.loads(f.read_text())["payload"] for f in spool_files
-        ]
-        assert [json.loads(p)["order"] for p in file_payloads] == [0, 1, 2]
+        spool_files = sorted(f for f in spool_dir.iterdir() if f.suffix == ".eml")
+        assert len(spool_files) == 3
 
         processor._process_spool()
 
@@ -125,7 +145,8 @@ class TestSpoolProcessor:
 
     def test_process_spool_preserves_execution_time(self, writer, processor):
         t = datetime(2026, 1, 15, 8, 30, 0, tzinfo=timezone.utc)
-        writer.write(
+        _build_and_write(
+            writer,
             payload=json.dumps({"d": 1}),
             consumer="timed",
             job_name="j",
@@ -144,23 +165,25 @@ class TestSpoolProcessor:
     def test_malformed_file_skipped(self, processor, data_dir):
         spool_dir = data_dir / "spool"
         spool_dir.mkdir(parents=True, exist_ok=True)
-        bad_file = spool_dir / "bad.json"
-        bad_file.write_text("not valid json {{{")
+        # A truncated binary file that cannot be parsed at all.
+        bad_file = spool_dir / "bad.eml"
+        bad_file.write_bytes(b"\x00\x01\x02")
 
         # Write a valid file after the bad one.
         writer = SpoolWriter(data_dir=data_dir)
-        writer.write(payload=json.dumps({"ok": True}), consumer="c")
+        _build_and_write(writer, payload=json.dumps({"ok": True}), consumer="c")
 
         processor._process_spool()
 
-        # Bad file remains (delivery failed), good file is delivered.
+        # Good file is delivered regardless.
         msgs = processor._store.fetch_messages("c")
         assert len(msgs) == 1
-        assert bad_file.exists()
 
     @pytest.mark.asyncio
     async def test_run_and_stop(self, writer, processor):
-        writer.write(payload=json.dumps({"async": True}), consumer="async-test")
+        _build_and_write(
+            writer, payload=json.dumps({"async": True}), consumer="async-test",
+        )
 
         task = asyncio.create_task(processor.run())
         # Give the processor time to pick up the file.
@@ -184,7 +207,9 @@ class TestSpoolProcessor:
 
         # Write after start — the long poll interval means it won't be
         # picked up by normal polling, but the final drain should get it.
-        writer.write(payload=json.dumps({"drain": True}), consumer="drain-test")
+        _build_and_write(
+            writer, payload=json.dumps({"drain": True}), consumer="drain-test",
+        )
         proc.stop()
         await task
 

@@ -1,8 +1,10 @@
 """File-based spool for asynchronous message delivery to Maildir.
 
-Producers write JSON envelope files atomically to ``<data_dir>/spool/``.
-A dedicated async task polls the spool directory and delivers each envelope
-to the appropriate Maildir via :class:`~overlord.maildir.MaildirStore`.
+Producers build an :class:`~email.message.EmailMessage` (via
+:meth:`~overlord.maildir.MaildirStore.build_message`) and write the RFC 822
+bytes atomically to ``<data_dir>/spool/``.  A dedicated async task polls the
+spool directory and delivers each message to the appropriate Maildir via
+:class:`~overlord.maildir.MaildirStore`.
 
 Atomic writes: files are first written to a ``tmp/`` subdirectory inside the
 spool, then renamed into the spool root.  This prevents the delivery task
@@ -10,12 +12,13 @@ from reading partially-written files.
 """
 
 import asyncio
-import json
 import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from email import policy
+from email.message import EmailMessage
+from email.parser import BytesParser
 from pathlib import Path
 from typing import Optional
 
@@ -25,7 +28,7 @@ logger = logging.getLogger("overlord.spool")
 
 
 class SpoolWriter:
-    """Write message envelopes atomically to the spool directory.
+    """Write RFC 822 message files atomically to the spool directory.
 
     Parameters
     ----------
@@ -40,46 +43,28 @@ class SpoolWriter:
         self.spool_dir.mkdir(parents=True, exist_ok=True)
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    def write(
-        self,
-        payload: str,
-        consumer: Optional[str] = None,
-        job_name: str = "unknown",
-        execution_time: Optional[datetime] = None,
-    ) -> Path:
-        """Write a message envelope to the spool atomically.
+    def write(self, msg: EmailMessage) -> Path:
+        """Write an RFC 822 message to the spool atomically.
 
         Parameters
         ----------
-        payload : str
-            JSON payload string.
-        consumer : str, optional
-            Target consumer name.  ``None`` routes to the catchall mailbox.
-        job_name : str
-            Originating job name.
-        execution_time : datetime, optional
-            Execution timestamp.  Defaults to now (UTC).
+        msg : EmailMessage
+            A fully-built RFC 822 message (e.g. from
+            :meth:`MaildirStore.build_message`).
 
         Returns
         -------
         Path
             The path of the delivered spool file.
         """
-        if execution_time is None:
-            execution_time = datetime.now(timezone.utc)
+        consumer = msg.get("X-Overlord-Consumer")
+        job_name = msg.get("X-Overlord-Job", "unknown")
 
-        envelope = {
-            "payload": payload,
-            "consumer": consumer,
-            "job_name": job_name,
-            "execution_time": execution_time.isoformat(),
-        }
-
-        filename = f"{time.monotonic_ns()}-{uuid.uuid4().hex}.json"
+        filename = f"{time.monotonic_ns()}-{uuid.uuid4().hex}.eml"
         tmp_path = self.tmp_dir / filename
         final_path = self.spool_dir / filename
 
-        tmp_path.write_text(json.dumps(envelope), encoding="utf-8")
+        tmp_path.write_bytes(msg.as_bytes())
         os.rename(tmp_path, final_path)
 
         logger.debug(
@@ -154,7 +139,7 @@ class SpoolProcessor:
         # Sort by filename (timestamp-prefixed) for FIFO ordering.
         spool_files = sorted(
             f for f in self.spool_dir.iterdir()
-            if f.is_file() and f.suffix == ".json"
+            if f.is_file() and f.suffix == ".eml"
         )
 
         for spool_file in spool_files:
@@ -164,24 +149,11 @@ class SpoolProcessor:
                 logger.exception("Failed to deliver spool file=%s", spool_file.name)
 
     def _deliver_file(self, spool_file: Path) -> None:
-        """Read a spool file, deliver to Maildir, and remove the file."""
-        data = json.loads(spool_file.read_text(encoding="utf-8"))
+        """Read an RFC 822 spool file, deliver to Maildir, and remove it."""
+        parser = BytesParser(policy=policy.default)
+        msg = parser.parsebytes(spool_file.read_bytes())
 
-        payload = data["payload"]
-        consumer = data.get("consumer")
-        job_name = data.get("job_name", "unknown")
-        execution_time_str = data.get("execution_time")
-
-        execution_time = None
-        if execution_time_str:
-            execution_time = datetime.fromisoformat(execution_time_str)
-
-        msg = MaildirStore.build_message(
-            payload=payload,
-            consumer=consumer,
-            job_name=job_name,
-            execution_time=execution_time,
-        )
+        consumer = msg.get("X-Overlord-Consumer")
 
         key = self._store.deliver(msg, consumer=consumer)
         spool_file.unlink()
