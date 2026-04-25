@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Optional
 
 from .database import Database
+from .maildir import MaildirStore
 from .models import ExecutionRecord, ExecutionStatus, Job, JobOutput, JobOutputError, Message
+from .spool import SpoolWriter
 
 logger = logging.getLogger("overlord.executor")
 
@@ -22,6 +24,7 @@ async def run_job(
     cancel_event: Optional[asyncio.Event] = None,
     input_messages: Optional[list[Message]] = None,
     cwd: Optional[Path] = None,
+    spool: Optional[SpoolWriter] = None,
 ) -> ExecutionRecord:
     """Execute a job's shell command, respecting locks, timeout, and retries.
 
@@ -90,7 +93,7 @@ async def run_job(
                             stderr="Cancelled before execution")
         last_record = db.get_execution(record.id)
 
-    last_record = _produce_message(job, last_record, db)
+    last_record = _produce_message(job, last_record, db, spool=spool)
     return last_record
 
 
@@ -172,7 +175,10 @@ def _reload_record(db: Database, record: ExecutionRecord) -> ExecutionRecord:
 
 
 def _produce_message(
-    job: Job, record: ExecutionRecord, db: Database,
+    job: Job,
+    record: ExecutionRecord,
+    db: Database,
+    spool: Optional[SpoolWriter] = None,
 ) -> ExecutionRecord:
     """Create a message from a completed job execution.
 
@@ -183,6 +189,9 @@ def _produce_message(
 
     For non-successful executions (failed/timeout), the raw execution
     details are used as the message payload without schema validation.
+
+    When *spool* is provided, messages are written to the file-based spool
+    (for async delivery to Maildir) instead of ``db.create_message()``.
 
     Returns the (possibly updated) execution record.
     """
@@ -208,7 +217,7 @@ def _produce_message(
                 "exit_code": record.exit_code,
                 "error": f"Output schema validation failed: {exc}",
             })
-            db.create_message(job.id, payload)
+            _emit_message(payload, job.name, spool=spool, db=db, job_id=job.id)
             logger.debug("job=%s execution=%d produced error message", job.name, record.id)
             return db.get_execution(record.id)
 
@@ -220,7 +229,10 @@ def _produce_message(
             "exit_code": record.exit_code,
             "message": output.message,
         })
-        db.create_message(job.id, payload, consumer=output.consumer)
+        _emit_message(
+            payload, job.name, consumer=output.consumer,
+            spool=spool, db=db, job_id=job.id,
+        )
         logger.debug(
             "job=%s execution=%d produced message consumer=%s",
             job.name, record.id, output.consumer,
@@ -235,9 +247,32 @@ def _produce_message(
             "stdout": record.stdout,
             "stderr": record.stderr,
         })
-        db.create_message(job.id, payload)
+        _emit_message(payload, job.name, spool=spool, db=db, job_id=job.id)
         logger.debug("job=%s execution=%d produced message", job.name, record.id)
     # Always return a fresh record from the DB so both success and failure
     # paths behave consistently.
     refreshed = db.get_execution(record.id)
     return refreshed if refreshed is not None else record
+
+
+def _emit_message(
+    payload: str,
+    job_name: str,
+    consumer: Optional[str] = None,
+    spool: Optional[SpoolWriter] = None,
+    db: Optional[Database] = None,
+    job_id: Optional[int] = None,
+) -> None:
+    """Write a message to the spool, falling back to db.create_message().
+
+    When *spool* is provided the message is built as an RFC 822 email and
+    written atomically to the spool directory for async Maildir delivery.
+    Otherwise, the legacy ``db.create_message()`` path is used.
+    """
+    if spool is not None:
+        msg = MaildirStore.build_message(
+            payload=payload, consumer=consumer, job_name=job_name,
+        )
+        spool.write(msg)
+    else:
+        db.create_message(job_id, payload, consumer=consumer)
