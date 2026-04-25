@@ -11,6 +11,7 @@ from typing import Optional
 from .database import DEFAULT_DB_PATH, Database
 from .executor import run_job
 from .models import ExecutionStatus, Job, JobStatus
+from .spool import SpoolWriter
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,7 @@ def create_mcp_server(
     host: str = "127.0.0.1",
     port: int = 8000,
     cwd: Optional[Path] = None,
+    spool: Optional[SpoolWriter] = None,
 ):
     """Create and return a FastMCP server wired to the given database.
 
@@ -101,6 +103,8 @@ def create_mcp_server(
     if db is None:
         db = Database(db_path=db_path)
         db.init_schema()
+    if spool is None:
+        spool = SpoolWriter(data_dir=db.db_path.parent)
 
     @mcp.tool()
     def register_job(
@@ -498,7 +502,7 @@ def create_mcp_server(
 
         async def _run() -> None:
             try:
-                await run_job(job, db, cwd=cwd)
+                await run_job(job, db, spool, cwd=cwd)
             except Exception:
                 logger.exception("trigger_job: background execution failed for %r", name)
 

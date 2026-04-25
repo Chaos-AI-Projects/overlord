@@ -4,6 +4,9 @@ import json
 
 import pytest
 
+from email import policy
+from email.parser import BytesParser
+
 from overlord.database import Database
 from overlord.executor import run_job
 from overlord.models import (
@@ -12,6 +15,7 @@ from overlord.models import (
     JobOutput,
     JobOutputError,
 )
+from overlord.spool import SpoolWriter
 
 
 @pytest.fixture
@@ -20,6 +24,34 @@ def db(tmp_path):
     d.init_schema()
     yield d
     d.close()
+
+
+@pytest.fixture
+def spool(tmp_path):
+    return SpoolWriter(data_dir=tmp_path)
+
+
+def read_spool_messages(tmp_path):
+    """Read all .eml files from the spool directory, return (headers, payload) tuples."""
+    spool_dir = tmp_path / "spool"
+    if not spool_dir.exists():
+        return []
+    parser = BytesParser(policy=policy.default)
+    results = []
+    for f in sorted(spool_dir.iterdir()):
+        if f.suffix == ".eml":
+            msg = parser.parsebytes(f.read_bytes())
+            # Extract JSON payload from the attachment.
+            payload_str = None
+            for part in msg.iter_attachments():
+                if part.get_content_type() == "application/json":
+                    payload_str = part.get_content().decode("utf-8")
+                    break
+            results.append({
+                "consumer": msg.get("X-Overlord-Consumer"),
+                "payload": payload_str,
+            })
+    return results
 
 
 def make_job(db, **kwargs) -> Job:
@@ -125,80 +157,80 @@ class TestExecutorStructuredOutput:
     """Integration tests: executor + structured output validation."""
 
     @pytest.mark.asyncio
-    async def test_valid_structured_output_success(self, db):
+    async def test_valid_structured_output_success(self, db, spool, tmp_path):
         output = json.dumps({"consumer": "watcher", "message": "done"})
         job = make_job(db, command=f"echo '{output}'")
-        record = await run_job(job, db)
+        record = await run_job(job, db, spool)
         assert record.status == ExecutionStatus.SUCCESS
 
-        messages = db.poll_messages()
+        messages = read_spool_messages(tmp_path)
         assert len(messages) == 1
-        assert messages[0].consumer == "watcher"
+        assert messages[0]["consumer"] == "watcher"
 
-        payload = json.loads(messages[0].payload)
+        payload = json.loads(messages[0]["payload"])
         assert payload["status"] == "success"
         assert payload["message"] == "done"
 
     @pytest.mark.asyncio
-    async def test_null_consumer_success(self, db):
+    async def test_null_consumer_success(self, db, spool, tmp_path):
         output = json.dumps({"consumer": None, "message": {"key": "val"}})
         job = make_job(db, command=f"echo '{output}'")
-        record = await run_job(job, db)
+        record = await run_job(job, db, spool)
         assert record.status == ExecutionStatus.SUCCESS
 
-        messages = db.poll_messages()
+        messages = read_spool_messages(tmp_path)
         assert len(messages) == 1
-        assert messages[0].consumer is None
+        assert messages[0]["consumer"] is None
 
     @pytest.mark.asyncio
-    async def test_invalid_output_marks_execution_failed(self, db):
+    async def test_invalid_output_marks_execution_failed(self, db, spool, tmp_path):
         """A job that exits 0 but produces non-schema stdout is marked FAILED."""
         job = make_job(db, command="echo 'not json'")
-        record = await run_job(job, db)
+        record = await run_job(job, db, spool)
 
         # The execution should be retroactively marked as failed.
         reloaded = db.get_execution(record.id)
         assert reloaded.status == ExecutionStatus.FAILED
         assert "schema validation failed" in reloaded.stderr.lower()
 
-        messages = db.poll_messages()
+        messages = read_spool_messages(tmp_path)
         assert len(messages) == 1
-        payload = json.loads(messages[0].payload)
+        payload = json.loads(messages[0]["payload"])
         assert payload["status"] == "failed"
         assert "error" in payload
 
     @pytest.mark.asyncio
-    async def test_plain_text_output_marks_failed(self, db):
+    async def test_plain_text_output_marks_failed(self, db, spool):
         job = make_job(db, command="echo hello world")
-        record = await run_job(job, db)
+        record = await run_job(job, db, spool)
 
         reloaded = db.get_execution(record.id)
         assert reloaded.status == ExecutionStatus.FAILED
 
     @pytest.mark.asyncio
-    async def test_failed_job_no_schema_validation(self, db):
+    async def test_failed_job_no_schema_validation(self, db, spool, tmp_path):
         """A job that exits non-zero does NOT get schema-validated."""
         job = make_job(db, command="echo 'raw output' && exit 1")
-        record = await run_job(job, db)
+        record = await run_job(job, db, spool)
         assert record.status == ExecutionStatus.FAILED
 
-        messages = db.poll_messages()
+        messages = read_spool_messages(tmp_path)
         assert len(messages) == 1
-        payload = json.loads(messages[0].payload)
+        payload = json.loads(messages[0]["payload"])
         assert payload["status"] == "failed"
         assert payload["stdout"] == "raw output\n"
 
     @pytest.mark.asyncio
-    async def test_consumer_stored(self, db):
+    async def test_consumer_stored(self, db, spool, tmp_path):
         output = json.dumps({
             "consumer": "target-job",
             "message": "routed",
         })
         job = make_job(db, command=f"echo '{output}'")
-        await run_job(job, db)
+        await run_job(job, db, spool)
 
-        messages = db.poll_messages()
-        assert messages[0].consumer == "target-job"
+        messages = read_spool_messages(tmp_path)
+        assert messages[0]["consumer"] == "target-job"
 
 
 class TestDatabaseConsumer:

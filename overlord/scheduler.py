@@ -23,8 +23,10 @@ from typing import Optional
 from .cron import CronExpression
 from .database import Database
 from .executor import run_job
+from .maildir import MaildirStore
 from .mcp_server import create_mcp_server
 from .models import Job, JobStatus
+from .spool import SpoolWriter
 
 logger = logging.getLogger("overlord.scheduler")
 
@@ -46,6 +48,7 @@ class Scheduler:
         mcp_port: int = 8000,
     ):
         self._db = Database(db_path)
+        self._spool = SpoolWriter(data_dir=self._db.db_path.parent)
         self._tick_seconds = tick_seconds
         self._stop_event = asyncio.Event()
         self._cancel_event = asyncio.Event()
@@ -58,7 +61,7 @@ class Scheduler:
         if mcp_host is not None:
             self._mcp_server = create_mcp_server(
                 db=self._db, host=mcp_host, port=mcp_port,
-                cwd=self._cwd,
+                cwd=self._cwd, spool=self._spool,
             )
 
     async def run(self) -> None:
@@ -251,13 +254,16 @@ class Scheduler:
             "status": "skipped",
             "reason": reason or f"queue '{job.queue_name}' is busy",
         })
-        self._db.create_message(job.id, payload)
+        msg = MaildirStore.build_message(
+            payload=payload, consumer=None, job_name=job.name,
+        )
+        self._spool.write(msg)
         logger.debug("job=%s emitted skipped message", job.name)
 
     async def _run_consumer_job(self, job, input_messages) -> None:
         """Run a job and auto-mark consumed messages on success."""
         record = await run_job(
-            job, self._db,
+            job, self._db, self._spool,
             cancel_event=self._cancel_event,
             input_messages=input_messages,
             cwd=self._cwd,

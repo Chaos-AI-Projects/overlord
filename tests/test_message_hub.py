@@ -5,9 +5,13 @@ import json
 
 import pytest
 
+from email import policy
+from email.parser import BytesParser
+
 from overlord.database import Database
 from overlord.executor import run_job
 from overlord.models import Job
+from overlord.spool import SpoolWriter
 
 
 @pytest.fixture
@@ -16,6 +20,33 @@ def db(tmp_path):
     d.init_schema()
     yield d
     d.close()
+
+
+@pytest.fixture
+def spool(tmp_path):
+    return SpoolWriter(data_dir=tmp_path)
+
+
+def read_spool_messages(tmp_path):
+    """Read all .eml files from the spool directory, return dicts with consumer/payload."""
+    spool_dir = tmp_path / "spool"
+    if not spool_dir.exists():
+        return []
+    parser = BytesParser(policy=policy.default)
+    results = []
+    for f in sorted(spool_dir.iterdir()):
+        if f.suffix == ".eml":
+            msg = parser.parsebytes(f.read_bytes())
+            payload_str = None
+            for part in msg.iter_attachments():
+                if part.get_content_type() == "application/json":
+                    payload_str = part.get_content().decode("utf-8")
+                    break
+            results.append({
+                "consumer": msg.get("X-Overlord-Consumer"),
+                "payload": payload_str,
+            })
+    return results
 
 
 def make_job(db, **kwargs) -> Job:
@@ -32,41 +63,41 @@ class TestMessageProduction:
     """Verify that the executor produces messages after job execution."""
 
     @pytest.mark.asyncio
-    async def test_successful_job_produces_message(self, db):
+    async def test_successful_job_produces_message(self, db, spool, tmp_path):
         output = json.dumps({"consumer": None, "message": "produced"})
         job = make_job(db, command=f"echo '{output}'")
-        await run_job(job, db)
+        await run_job(job, db, spool)
 
-        messages = db.poll_messages()
+        messages = read_spool_messages(tmp_path)
         assert len(messages) == 1
 
-        payload = json.loads(messages[0].payload)
+        payload = json.loads(messages[0]["payload"])
         assert payload["job_name"] == "test-job"
         assert payload["status"] == "success"
         assert payload["message"] == "produced"
 
     @pytest.mark.asyncio
-    async def test_failed_job_produces_message(self, db):
+    async def test_failed_job_produces_message(self, db, spool, tmp_path):
         job = make_job(db, command="exit 1")
-        await run_job(job, db)
+        await run_job(job, db, spool)
 
-        messages = db.poll_messages()
+        messages = read_spool_messages(tmp_path)
         assert len(messages) == 1
 
-        payload = json.loads(messages[0].payload)
+        payload = json.loads(messages[0]["payload"])
         assert payload["status"] == "failed"
         assert payload["exit_code"] == 1
 
     @pytest.mark.asyncio
-    async def test_retried_job_produces_single_message(self, db):
+    async def test_retried_job_produces_single_message(self, db, spool, tmp_path):
         job = make_job(db, command="exit 1", max_retries=2, retry_delay_seconds=0)
-        await run_job(job, db)
+        await run_job(job, db, spool)
 
-        messages = db.poll_messages()
+        messages = read_spool_messages(tmp_path)
         # Only the final execution result produces a message.
         assert len(messages) == 1
 
-        payload = json.loads(messages[0].payload)
+        payload = json.loads(messages[0]["payload"])
         assert payload["status"] == "failed"
 
 

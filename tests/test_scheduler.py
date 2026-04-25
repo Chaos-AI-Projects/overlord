@@ -5,6 +5,9 @@ import json
 
 import pytest
 
+from email import policy
+from email.parser import BytesParser
+
 from overlord.database import Database
 from overlord.models import ExecutionStatus, Job, JobStatus
 from overlord.scheduler import Scheduler
@@ -261,7 +264,7 @@ class TestSchedulerQueues:
         await asyncio.gather(*scheduler._running_tasks.values(), return_exceptions=True)
 
     @pytest.mark.asyncio
-    async def test_same_name_dedup(self, scheduler):
+    async def test_same_name_dedup(self, scheduler, tmp_path):
         """A job already pending in a queue should not be enqueued again."""
         scheduler._db.create_job(Job(
             name="slow-job",
@@ -284,11 +287,20 @@ class TestSchedulerQueues:
         await scheduler._tick()
         assert len(scheduler._pending_queues["serial"]) == 1
 
-        # A "skipped" message should have been emitted for the dedup.
-        msgs = scheduler._db.query_messages()
-        skipped = [m for m in msgs if '"skipped"' in m.payload]
+        # A "skipped" message should have been emitted to the spool for the dedup.
+        spool_dir = tmp_path / "spool"
+        parser = BytesParser(policy=policy.default)
+        spool_files = sorted(f for f in spool_dir.iterdir() if f.suffix == ".eml")
+        skipped = []
+        for f in spool_files:
+            msg = parser.parsebytes(f.read_bytes())
+            for part in msg.iter_attachments():
+                if part.get_content_type() == "application/json":
+                    payload = part.get_content().decode("utf-8")
+                    if '"skipped"' in payload:
+                        skipped.append(payload)
         assert len(skipped) == 1
-        assert "already pending" in skipped[0].payload
+        assert "already pending" in skipped[0]
 
         # Clean up.
         for t in scheduler._running_tasks.values():
