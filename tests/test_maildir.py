@@ -20,7 +20,8 @@ def store(tmp_path):
 class TestDeliver:
     def test_deliver_to_consumer(self, store):
         payload = json.dumps({"msg": "hello"})
-        key = store.deliver(payload, consumer="worker", job_name="test-job")
+        msg = MaildirStore.build_message(payload, consumer="worker", job_name="test-job")
+        key = store.deliver(msg, consumer="worker")
         assert key is not None
 
         # Message should be in the worker mailbox
@@ -32,7 +33,8 @@ class TestDeliver:
 
     def test_deliver_to_catchall(self, store):
         payload = json.dumps({"msg": "unaddressed"})
-        store.deliver(payload, consumer=None, job_name="bcast")
+        msg = MaildirStore.build_message(payload, consumer=None, job_name="bcast")
+        store.deliver(msg, consumer=None)
 
         msgs = store.fetch_messages(CATCHALL)
         assert len(msgs) == 1
@@ -42,7 +44,8 @@ class TestDeliver:
     def test_deliver_with_execution_time(self, store):
         t = datetime(2026, 4, 25, 12, 0, 0, tzinfo=timezone.utc)
         payload = json.dumps({"data": 1})
-        store.deliver(payload, consumer="w", job_name="j", execution_time=t)
+        msg = MaildirStore.build_message(payload, consumer="w", job_name="j", execution_time=t)
+        store.deliver(msg, consumer="w")
 
         msgs = store.fetch_messages("w")
         assert len(msgs) == 1
@@ -50,7 +53,8 @@ class TestDeliver:
 
     def test_deliver_multiple_messages(self, store):
         for i in range(3):
-            store.deliver(json.dumps({"i": i}), consumer="multi")
+            msg = MaildirStore.build_message(json.dumps({"i": i}), consumer="multi")
+            store.deliver(msg, consumer="multi")
 
         msgs = store.fetch_messages("multi")
         assert len(msgs) == 3
@@ -59,7 +63,8 @@ class TestDeliver:
 class TestConsume:
     def test_consume_moves_to_processed(self, store):
         payload = json.dumps({"data": "test"})
-        key = store.deliver(payload, consumer="c1", job_name="j1")
+        msg = MaildirStore.build_message(payload, consumer="c1", job_name="j1")
+        key = store.deliver(msg, consumer="c1")
 
         # Before consume
         assert store.count_messages("c1") == 1
@@ -80,7 +85,8 @@ class TestConsume:
     def test_consume_bulk(self, store):
         keys = []
         for i in range(3):
-            k = store.deliver(json.dumps({"i": i}), consumer="bulk")
+            msg = MaildirStore.build_message(json.dumps({"i": i}), consumer="bulk")
+            k = store.deliver(msg, consumer="bulk")
             keys.append(k)
 
         assert store.count_messages("bulk") == 3
@@ -94,23 +100,23 @@ class TestConsume:
 
 class TestFetchUnconsumed:
     def test_fetch_by_consumer_name(self, store):
-        store.deliver(json.dumps({"a": 1}), consumer="alpha")
-        store.deliver(json.dumps({"b": 2}), consumer="beta")
+        store.deliver(MaildirStore.build_message(json.dumps({"a": 1}), consumer="alpha"), consumer="alpha")
+        store.deliver(MaildirStore.build_message(json.dumps({"b": 2}), consumer="beta"), consumer="beta")
 
         msgs = store.fetch_unconsumed_for_consumers(["alpha"])
         assert len(msgs) == 1
         assert json.loads(msgs[0]["payload"]) == {"a": 1}
 
     def test_fetch_wildcard_returns_catchall(self, store):
-        store.deliver(json.dumps({"c": 3}), consumer=None)
+        store.deliver(MaildirStore.build_message(json.dumps({"c": 3}), consumer=None), consumer=None)
 
         msgs = store.fetch_unconsumed_for_consumers(["*"])
         assert len(msgs) == 1
         assert json.loads(msgs[0]["payload"]) == {"c": 3}
 
     def test_fetch_multiple_consumers(self, store):
-        store.deliver(json.dumps({"a": 1}), consumer="alpha")
-        store.deliver(json.dumps({"b": 2}), consumer="beta")
+        store.deliver(MaildirStore.build_message(json.dumps({"a": 1}), consumer="alpha"), consumer="alpha")
+        store.deliver(MaildirStore.build_message(json.dumps({"b": 2}), consumer="beta"), consumer="beta")
 
         msgs = store.fetch_unconsumed_for_consumers(["alpha", "beta"])
         assert len(msgs) == 2
@@ -121,9 +127,9 @@ class TestListMailboxes:
         assert store.list_mailboxes() == []
 
     def test_list_after_delivery(self, store):
-        store.deliver(json.dumps({"x": 1}), consumer="foo")
-        store.deliver(json.dumps({"x": 2}), consumer="bar")
-        store.deliver(json.dumps({"x": 3}), consumer=None)
+        store.deliver(MaildirStore.build_message(json.dumps({"x": 1}), consumer="foo"), consumer="foo")
+        store.deliver(MaildirStore.build_message(json.dumps({"x": 2}), consumer="bar"), consumer="bar")
+        store.deliver(MaildirStore.build_message(json.dumps({"x": 3}), consumer=None), consumer=None)
 
         boxes = store.list_mailboxes()
         assert "foo" in boxes
@@ -134,13 +140,15 @@ class TestListMailboxes:
 class TestPayloadExtraction:
     def test_payload_is_valid_json(self, store):
         original = {"nested": {"key": "value"}, "list": [1, 2, 3]}
-        store.deliver(json.dumps(original), consumer="jsontest")
+        msg = MaildirStore.build_message(json.dumps(original), consumer="jsontest")
+        store.deliver(msg, consumer="jsontest")
 
         msgs = store.fetch_messages("jsontest")
         assert json.loads(msgs[0]["payload"]) == original
 
     def test_rfc822_envelope_structure(self, store):
-        store.deliver(json.dumps({"d": 1}), consumer="rfc", job_name="myjob")
+        msg = MaildirStore.build_message(json.dumps({"d": 1}), consumer="rfc", job_name="myjob")
+        store.deliver(msg, consumer="rfc")
 
         md = mailbox.Maildir(str(store.mailboxes_dir / "rfc"))
         for key, msg in md.iteritems():

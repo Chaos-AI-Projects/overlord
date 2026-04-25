@@ -68,21 +68,21 @@ class MaildirStore:
     # Delivery
     # ------------------------------------------------------------------
 
-    def deliver(
-        self,
+    @staticmethod
+    def build_message(
         payload: str,
         consumer: Optional[str] = None,
         job_name: str = "unknown",
         execution_time: Optional[datetime] = None,
-    ) -> str:
-        """Deliver a message to the appropriate Maildir.
+    ) -> EmailMessage:
+        """Build an RFC 822 message for delivery.
 
         Parameters
         ----------
         payload : str
             JSON payload string.
         consumer : str, optional
-            Target consumer name.  ``None`` routes to the catchall mailbox.
+            Target consumer name (stored in X-Overlord-Consumer header).
         job_name : str
             Originating job name (used in the Subject header).
         execution_time : datetime, optional
@@ -90,10 +90,9 @@ class MaildirStore:
 
         Returns
         -------
-        str
-            The Maildir message key of the delivered message.
+        EmailMessage
+            The constructed message ready for delivery.
         """
-        target = consumer or CATCHALL
         if execution_time is None:
             execution_time = datetime.now(timezone.utc)
 
@@ -113,12 +112,35 @@ class MaildirStore:
             filename="payload.json",
         )
 
+        return msg
+
+    def deliver(
+        self,
+        msg: EmailMessage,
+        consumer: Optional[str] = None,
+    ) -> str:
+        """Deliver an RFC 822 message to the appropriate Maildir.
+
+        Parameters
+        ----------
+        msg : EmailMessage
+            The RFC 822 message to deliver.
+        consumer : str, optional
+            Target consumer name.  ``None`` routes to the catchall mailbox.
+
+        Returns
+        -------
+        str
+            The Maildir message key of the delivered message.
+        """
+        target = consumer or CATCHALL
+
         md = self._get_maildir(target)
         key = md.add(msg)
         md.flush()
         logger.debug(
-            "delivered message key=%s to mailbox=%s job=%s",
-            key, target, job_name,
+            "delivered message key=%s to mailbox=%s",
+            key, target,
         )
         return key
 
@@ -172,10 +194,10 @@ class MaildirStore:
             )
             return
 
-        processed.add(msg)
-        processed.flush()
         md.discard(key)
         md.flush()
+        processed.add(msg)
+        processed.flush()
         logger.debug("consumed message key=%s from mailbox=%s", key, consumer)
 
     def consume_bulk(self, consumer: str, keys: list[str]) -> None:
