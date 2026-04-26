@@ -14,6 +14,7 @@ from reading partially-written files.
 import asyncio
 import logging
 import os
+import signal
 import time
 import uuid
 from email import policy
@@ -71,6 +72,17 @@ class SpoolWriter:
             "spooled message file=%s consumer=%s job=%s",
             filename, consumer, job_name,
         )
+
+        # Wake the spool processor if a SIGUSR1 handler has been registered.
+        # The default disposition (SIG_DFL) would terminate the process, so
+        # only send when something is actively listening.
+        current = signal.getsignal(signal.SIGUSR1)
+        if current not in (signal.SIG_DFL, signal.SIG_IGN, None):
+            try:
+                os.kill(os.getpid(), signal.SIGUSR1)
+            except OSError:
+                pass
+
         return final_path
 
 
@@ -89,43 +101,69 @@ class SpoolProcessor:
     def __init__(
         self,
         data_dir: Optional[Path] = None,
-        poll_interval: float = 1.0,
+        poll_interval: float = 30.0,
     ):
         self.data_dir = data_dir or DEFAULT_DATA_DIR
         self.spool_dir = self.data_dir / "spool"
         self.poll_interval = poll_interval
         self._store = MaildirStore(data_dir=self.data_dir)
         self._stop_event = asyncio.Event()
+        self._wake_event = asyncio.Event()
 
     async def run(self) -> None:
-        """Poll the spool directory and deliver messages until stopped."""
+        """Poll the spool directory and deliver messages until stopped.
+
+        A SIGUSR1 handler is registered so that writers in the same process
+        can interrupt the poll sleep and trigger immediate processing.
+        """
         self.spool_dir.mkdir(parents=True, exist_ok=True)
+
+        loop = asyncio.get_running_loop()
+        try:
+            loop.add_signal_handler(signal.SIGUSR1, self._wake_event.set)
+        except (ValueError, OSError):
+            # Signal handlers can't be set from non-main threads or on
+            # platforms that don't support it (Windows).
+            logger.debug("Could not register SIGUSR1 handler; polling only")
+
         logger.info(
             "Spool processor started (poll_interval=%.1fs, spool_dir=%s)",
             self.poll_interval, self.spool_dir,
         )
 
-        while not self._stop_event.is_set():
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    self._process_spool()
+                except Exception:
+                    logger.exception("Error processing spool directory")
+
+                self._wake_event.clear()
+                # Wait until either stop, wake (SIGUSR1), or timeout.
+                done, _ = await asyncio.wait(
+                    [
+                        asyncio.ensure_future(self._stop_event.wait()),
+                        asyncio.ensure_future(self._wake_event.wait()),
+                    ],
+                    timeout=self.poll_interval,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                # Cancel leftover futures.
+                for fut in _:
+                    fut.cancel()
+
+            # Final drain before exit.
             try:
                 self._process_spool()
             except Exception:
-                logger.exception("Error processing spool directory")
+                logger.exception("Error during final spool drain")
 
+            logger.info("Spool processor stopped")
+        finally:
             try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(),
-                    timeout=self.poll_interval,
-                )
-            except asyncio.TimeoutError:
-                pass  # normal: poll interval elapsed
-
-        # Final drain before exit.
-        try:
-            self._process_spool()
-        except Exception:
-            logger.exception("Error during final spool drain")
-
-        logger.info("Spool processor stopped")
+                loop.remove_signal_handler(signal.SIGUSR1)
+            except (ValueError, OSError):
+                pass
 
     def stop(self) -> None:
         """Signal the processor to stop after the current poll cycle."""

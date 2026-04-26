@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import signal
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -214,4 +216,85 @@ class TestSpoolProcessor:
         await task
 
         msgs = proc._store.fetch_messages("drain-test")
+        assert len(msgs) == 1
+
+    @pytest.mark.asyncio
+    async def test_sigusr1_wakes_processor(self, data_dir):
+        """SIGUSR1 interrupts the poll sleep and triggers immediate processing."""
+        writer = SpoolWriter(data_dir=data_dir)
+        proc = SpoolProcessor(data_dir=data_dir, poll_interval=60.0)
+
+        task = asyncio.create_task(proc.run())
+        # Let the processor start and enter its sleep.
+        await asyncio.sleep(0.1)
+
+        # Write a message (SpoolWriter.write sends SIGUSR1 automatically).
+        _build_and_write(
+            writer, payload=json.dumps({"wake": True}), consumer="wake-test",
+        )
+
+        # The signal should wake the processor almost immediately.
+        await asyncio.sleep(0.3)
+        proc.stop()
+        await task
+
+        msgs = proc._store.fetch_messages("wake-test")
+        assert len(msgs) == 1
+        assert json.loads(msgs[0]["payload"]) == {"wake": True}
+
+    @pytest.mark.asyncio
+    async def test_signal_handler_cleaned_up_on_stop(self, data_dir):
+        """SIGUSR1 handler is removed after the processor stops."""
+        proc = SpoolProcessor(data_dir=data_dir, poll_interval=0.1)
+
+        task = asyncio.create_task(proc.run())
+        await asyncio.sleep(0.05)
+        proc.stop()
+        await task
+
+        # After stop, sending SIGUSR1 should use the default handler
+        # (which terminates the process) — but we can't safely test that.
+        # Instead, verify _wake_event is no longer being set by the handler.
+        proc._wake_event.clear()
+        # Reinstall a no-op handler so the signal doesn't kill the test.
+        loop = asyncio.get_running_loop()
+        received = []
+        loop.add_signal_handler(signal.SIGUSR1, lambda: received.append(True))
+        try:
+            os.kill(os.getpid(), signal.SIGUSR1)
+            await asyncio.sleep(0.05)
+            # The processor's handler should NOT have set _wake_event.
+            assert not proc._wake_event.is_set()
+            # Our temporary handler caught the signal.
+            assert len(received) == 1
+        finally:
+            loop.remove_signal_handler(signal.SIGUSR1)
+
+    @pytest.mark.asyncio
+    async def test_poll_interval_fallback(self, data_dir):
+        """Without a signal, the processor falls back to poll_interval."""
+        proc = SpoolProcessor(data_dir=data_dir, poll_interval=0.2)
+        writer = SpoolWriter(data_dir=data_dir)
+
+        task = asyncio.create_task(proc.run())
+        await asyncio.sleep(0.05)
+
+        # Write directly to spool bypassing SpoolWriter to avoid SIGUSR1.
+        msg = MaildirStore.build_message(
+            payload=json.dumps({"poll": True}),
+            consumer="poll-test",
+            job_name="test",
+        )
+        import time, uuid
+        filename = f"{time.monotonic_ns()}-{uuid.uuid4().hex}.eml"
+        spool_dir = data_dir / "spool"
+        spool_dir.mkdir(parents=True, exist_ok=True)
+        (spool_dir / filename).write_bytes(msg.as_bytes())
+
+        # Wait long enough for poll_interval to elapse.
+        await asyncio.sleep(0.5)
+        proc.stop()
+        await task
+
+        msgs = proc._store.fetch_messages("poll-test")
         assert len(msgs) == 1
