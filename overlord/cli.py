@@ -14,6 +14,7 @@ Usage::
     overlord unregister JOB_NAME [--mcp-url URL]
     overlord trigger JOB_NAME [--mcp-url URL]
     overlord send [--consumer NAME] [--payload TEXT] [--mcp-url URL]
+    overlord migrate-jobs [--db PATH] [--data-dir PATH]
 """
 
 import argparse
@@ -421,6 +422,39 @@ def cmd_send(args: argparse.Namespace) -> None:
     print(f"Message spooled ({spool_path.name}{consumer_info})")
 
 
+def cmd_migrate_jobs(args: argparse.Namespace) -> None:
+    """One-time migration: export job definitions from SQLite to JSON files."""
+    from .database import Database
+    from .job_store import JobStore
+
+    db = Database(db_path=Path(args.db) if args.db else None)
+    db.init_schema()
+
+    store = JobStore(data_dir=Path(args.data_dir) if args.data_dir else None)
+
+    jobs = db.list_jobs()
+    if not jobs:
+        print("No jobs found in SQLite database.")
+        return
+
+    migrated = 0
+    skipped = 0
+    for job in jobs:
+        existing = store.get_job_by_name(job.name)
+        if existing:
+            print(f"  skip: {job.name} (already exists)")
+            skipped += 1
+            continue
+        # Clear the SQLite integer id — JSON store doesn't use it
+        job.id = None
+        store.create_job(job)
+        print(f"  migrated: {job.name}")
+        migrated += 1
+
+    print(f"\nDone. Migrated {migrated} job(s), skipped {skipped}.")
+    db.close()
+
+
 def cmd_messages(args: argparse.Namespace) -> None:
     """Query messages by reading directly from Maildir directories."""
     from . import maildir as _maildir
@@ -574,6 +608,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--consumer", metavar="NAME", help="Consumer name the message is addressed to")
     p_send.add_argument("--payload", metavar="TEXT", help="Message payload (reads stdin if omitted)")
     p_send.set_defaults(func=cmd_send)
+
+    # migrate-jobs
+    p_mig = sub.add_parser("migrate-jobs", help="One-time migration: export job definitions from SQLite to JSON")
+    p_mig.add_argument("--db", metavar="PATH", help="Path to SQLite database file")
+    p_mig.add_argument("--data-dir", metavar="PATH", help="Path to JSON data directory")
+    p_mig.set_defaults(func=cmd_migrate_jobs)
 
     # messages
     p_msg = sub.add_parser("messages", help="Query messages")
