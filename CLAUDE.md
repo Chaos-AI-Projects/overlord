@@ -11,7 +11,7 @@ Included in the mono-repo via `git subtree` from `git@github.com:Chaos-AI-Projec
 pip install -e overlord
 
 # Run scheduler daemon
-overlord daemon [--db PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT]
+overlord daemon [--data-dir PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT]
 
 # Manage jobs via CLI (talks to daemon over MCP)
 overlord list [--status STATUS] [--mcp-url URL]
@@ -35,51 +35,75 @@ overlord/
 │   ├── cli.py               # CLI entry point (argparse)
 │   ├── scheduler.py         # Cron-based async scheduler with graceful shutdown
 │   ├── executor.py          # Job execution with locking & retries
-│   ├── database.py          # SQLite database layer (WAL mode)
-│   ├── models.py            # Data models (Job, ExecutionRecord, Message, Lock, JobOutput)
+│   ├── job_store.py         # JSON file-based job storage (one file per job)
+│   ├── execution_log.py     # JSON-lines append-only execution history
+│   ├── lock_store.py        # File-based named locks (O_CREAT|O_EXCL)
+│   ├── maildir.py           # Maildir-backed message delivery
+│   ├── spool.py             # Async spool for message delivery to Maildir
+│   ├── models.py            # Data models (Job, ExecutionRecord, Lock, JobOutput)
 │   ├── cron.py              # Cron expression parser
 │   ├── mcp_server.py        # MCP server for agent-driven job management
+│   ├── vault_template.py    # Template for `overlord init` vault scaffolding
 │   └── logging_config.py    # Logging setup
 ├── tests/                   # Test files
+├── scripts/                 # Utility scripts (e.g., migration)
 ├── pyproject.toml           # Package metadata & dependencies
 └── LICENSE
 ```
 
 ## Architecture
 
+### Storage Backends
+
+All state is stored as plain files under `$XDG_DATA_HOME/overlord/` (default: `~/.local/share/overlord/`):
+
+| Component | Backend | Path |
+|-----------|---------|------|
+| Job definitions | JSON files (one per job) | `jobs/<name>.json` |
+| Execution history | Append-only JSON-lines | `execution.log` |
+| Execution ID counter | Plain text integer | `execution_id` |
+| Named locks | Empty files (O_CREAT\|O_EXCL) | `locks/<lock_name>` |
+| Messages | Maildir (RFC 822 envelopes) | `mailboxes/<consumer>/` |
+| Delivery queue | File-based spool | `spool/` |
+
+Concurrency is handled via `flock(2)` for job files and the ID counter, `O_CREAT|O_EXCL` for locks, and POSIX `O_APPEND` atomicity for the execution log.
+
 ### Scheduler
 
-- Asyncio-based loop that ticks once per minute
+- Asyncio-based loop that ticks once per minute (configurable)
 - Evaluates enabled jobs against their cron expressions
 - Dispatches due jobs via the executor as concurrent asyncio tasks
+- Queue-based execution ordering: jobs on the same queue run serially
 - Handles SIGTERM/SIGINT for graceful shutdown
-- Cleans up stale locks and validates schema version on startup
+- Cleans up stale locks and marks orphaned executions as failed on startup
 
 ### Job Execution
 
 - Jobs run as subprocesses with optional exclusive locking
 - Configurable timeout, max retries, and retry delay
 - Structured output: successful jobs emit JSON `{"consumer": ..., "message": ...}` on stdout
-- Output is parsed via `JobOutput.from_stdout()` and routed to the message hub
+- Output is parsed via `JobOutput.from_stdout()` and delivered to the spool
 
 ### Message Passing
 
-- Jobs can produce messages addressed to a named consumer (or unaddressed)
+- Jobs produce messages delivered via the spool to Maildir
+- Messages are RFC 822 envelopes with a `payload.json` attachment
 - Consumer jobs declare what they consume via `Job.consumes` list
-- Consumer jobs only run when matching unconsumed messages exist
+- Consumer jobs only run when matching unconsumed messages exist in their Maildir
 - Messages are passed to consumer jobs via stdin and auto-marked consumed on success
+- Spool processor runs as an async task alongside the scheduler, woken by SIGUSR1
 
 ### MCP Interface
 
 - StreamableHTTP MCP server runs alongside the scheduler
-- Exposes tools: register/unregister jobs, list jobs, trigger execution, query messages
-- CLI commands communicate with the daemon through MCP (avoids direct DB access)
+- Exposes tools: register/unregister jobs, list jobs, trigger execution, query/send messages
+- CLI commands communicate with the daemon through MCP (avoids direct file access)
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `XDG_DATA_HOME` | `~/.local/share` | Data directory (DB stored at `$XDG_DATA_HOME/overlord/overlord.db`) |
+| `XDG_DATA_HOME` | `~/.local/share` | Data directory (state stored under `$XDG_DATA_HOME/overlord/`) |
 | `TZ` | `UTC` | Timezone for cron schedule evaluation and log/CLI timestamp display (e.g., `Australia/Sydney`) |
 
 ## Container
@@ -129,7 +153,7 @@ podman run -d \
 Replace `podman` with `docker` if using Docker. The container:
 
 - Exposes the MCP server on port **8000**
-- Persists all state (database, claude-code install, brain/) in the mounted volume at `/home/overlord`
+- Persists all state (jobs, execution log, mailboxes, claude-code install, brain/) in the mounted volume at `/home/overlord`
 - Auto-installs `claude-code` on first start into the volume
 - UID mapping is handled by podman (`--userns=keep-id`) rather than inside the container
 - Passes any extra arguments to `overlord daemon` (e.g., `--tick 30`)
