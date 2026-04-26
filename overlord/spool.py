@@ -133,12 +133,14 @@ class SpoolProcessor:
 
         try:
             while not self._stop_event.is_set():
+                # Clear wake *before* processing so that a SIGUSR1 arriving
+                # during _process_spool() keeps the event set and triggers an
+                # immediate re-loop instead of being swallowed.
+                self._wake_event.clear()
                 try:
                     self._process_spool()
                 except Exception:
                     logger.exception("Error processing spool directory")
-
-                self._wake_event.clear()
                 # Wait until either stop, wake (SIGUSR1), or timeout.
                 done, _ = await asyncio.wait(
                     [
