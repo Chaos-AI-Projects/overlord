@@ -6,7 +6,9 @@ representing either the start or completion of a job execution.
 
 A monotonically increasing execution ID is maintained in a separate
 counter file (``<data_dir>/execution_id``).  File locking via ``flock(2)``
-ensures safe concurrent access.
+ensures safe concurrent access to the counter.  The log file itself
+relies on the POSIX guarantee that ``O_APPEND`` writes below
+``PIPE_BUF`` (4 096 bytes) are atomic.
 """
 
 import fcntl
@@ -108,21 +110,28 @@ class ExecutionLog:
             return next_val
 
     def _append(self, record: ExecutionRecord) -> None:
-        """Append a JSON line for *record* to the log file."""
+        """Append a JSON line for *record* to the log file.
+
+        On Linux, ``open("a")`` sets ``O_APPEND`` and writes smaller than
+        ``PIPE_BUF`` (4 096 bytes) are atomic — no flock needed.
+        """
         line = json.dumps(_record_to_dict(record), separators=(",", ":")) + "\n"
-        with _flock_path(self._log_path):
-            with open(self._log_path, "a", encoding="utf-8") as f:
-                f.write(line)
-                f.flush()
-                os.fsync(f.fileno())
+        with open(self._log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
 
     def _read_lines(self) -> list[dict]:
-        """Read all JSON lines from the log file."""
-        with _flock_path(self._log_path, shared=True):
-            try:
-                text = self._log_path.read_text(encoding="utf-8")
-            except FileNotFoundError:
-                return []
+        """Read all JSON lines from the log file.
+
+        No flock needed: each line is atomically appended, and the
+        ``JSONDecodeError`` guard below safely skips any partial trailing
+        line observed during a concurrent write.
+        """
+        try:
+            text = self._log_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return []
         entries = []
         for line in text.splitlines():
             line = line.strip()
