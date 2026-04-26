@@ -6,6 +6,7 @@ import json
 import pytest
 
 from overlord.database import Database
+from overlord.maildir import MaildirStore
 from overlord.mcp_server import create_mcp_server, _job_to_dict, _execution_to_dict
 from overlord.models import ExecutionRecord, ExecutionStatus, Job, JobStatus
 
@@ -145,20 +146,21 @@ class TestToolsIntegration:
 
     @pytest.fixture
     def tools(self, tmp_path):
-        """Return a dict mapping tool-name -> callable, plus the backing DB."""
+        """Return a dict mapping tool-name -> callable, plus the backing DB and MaildirStore."""
         db_path = tmp_path / "integration.db"
         server = create_mcp_server(db_path=db_path)
         db = Database(db_path=db_path)
+        store = MaildirStore(data_dir=tmp_path)
         # DB is already initialised by create_mcp_server
 
         # Extract the raw tool callables from FastMCP internals
         tool_map = {}
         for t in server._tool_manager.list_tools():
             tool_map[t.name] = t.fn
-        return tool_map, db
+        return tool_map, db, store
 
     def test_register_job(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         result = json.loads(tool_map["register_job"](
             name="cron-job",
             cron_expression="*/10 * * * *",
@@ -172,7 +174,7 @@ class TestToolsIntegration:
         db.close()
 
     def test_register_job_with_consumes(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         result = json.loads(tool_map["register_job"](
             name="consumer-job",
             cron_expression="*/5 * * * *",
@@ -185,7 +187,7 @@ class TestToolsIntegration:
         db.close()
 
     def test_register_job_with_options(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         result = json.loads(tool_map["register_job"](
             name="fancy-job",
             cron_expression="0 2 * * *",
@@ -201,7 +203,7 @@ class TestToolsIntegration:
         db.close()
 
     def test_register_job_duplicate_name(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         tool_map["register_job"](
             name="dup-job",
             cron_expression="* * * * *",
@@ -217,7 +219,7 @@ class TestToolsIntegration:
         db.close()
 
     def test_unregister_job(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         tool_map["register_job"](
             name="doomed",
             cron_expression="* * * * *",
@@ -229,13 +231,13 @@ class TestToolsIntegration:
         db.close()
 
     def test_unregister_nonexistent(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         result = json.loads(tool_map["unregister_job"](name="ghost"))
         assert "error" in result
         db.close()
 
     def test_list_jobs(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         tool_map["register_job"](name="j1", cron_expression="* * * * *", command="echo 1")
         tool_map["register_job"](name="j2", cron_expression="* * * * *", command="echo 2")
         result = json.loads(tool_map["list_jobs"]())
@@ -245,7 +247,7 @@ class TestToolsIntegration:
         db.close()
 
     def test_list_jobs_filter_status(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         tool_map["register_job"](name="active", cron_expression="* * * * *", command="echo a")
         # Create a disabled job directly via DB
         disabled_job = Job(
@@ -266,13 +268,13 @@ class TestToolsIntegration:
         db.close()
 
     def test_list_jobs_invalid_status(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         result = json.loads(tool_map["list_jobs"](status="bogus"))
         assert "error" in result
         db.close()
 
     def test_get_job_status(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         tool_map["register_job"](
             name="status-check",
             cron_expression="*/5 * * * *",
@@ -284,7 +286,7 @@ class TestToolsIntegration:
         db.close()
 
     def test_get_job_status_with_executions(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         tool_map["register_job"](
             name="has-history",
             cron_expression="* * * * *",
@@ -301,13 +303,13 @@ class TestToolsIntegration:
         db.close()
 
     def test_get_job_status_nonexistent(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         result = json.loads(tool_map["get_job_status"](name="nope"))
         assert "error" in result
         db.close()
 
     def test_update_job(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         tool_map["register_job"](
             name="updatable",
             cron_expression="* * * * *",
@@ -330,7 +332,7 @@ class TestToolsIntegration:
         db.close()
 
     def test_update_job_partial(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         tool_map["register_job"](
             name="partial-update",
             cron_expression="* * * * *",
@@ -348,13 +350,13 @@ class TestToolsIntegration:
         db.close()
 
     def test_update_job_nonexistent(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         result = json.loads(tool_map["update_job"](name="ghost"))
         assert "error" in result
         db.close()
 
     def test_update_job_consumes(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         tool_map["register_job"](
             name="consumer-update",
             cron_expression="* * * * *",
@@ -373,64 +375,62 @@ class TestToolsIntegration:
         assert result["consumes"] == []
         db.close()
 
+    def _deliver(self, store, payload, consumer=None, job_name="test-job"):
+        """Helper to deliver a message directly to Maildir."""
+        msg = MaildirStore.build_message(
+            payload=payload, consumer=consumer, job_name=job_name,
+        )
+        store.deliver(msg, consumer=consumer)
+
     def test_query_messages_all(self, tools):
-        tool_map, db = tools
-        tool_map["register_job"](name="msg-job", cron_expression="* * * * *", command="echo hi")
-        job = db.get_job_by_name("msg-job")
-        db.create_message(job.id, '{"test": true}', consumer="agent")
-        db.create_message(job.id, '{"test": false}', consumer="logger")
+        tool_map, db, store = tools
+        self._deliver(store, '{"test": true}', consumer="agent", job_name="msg-job")
+        self._deliver(store, '{"test": false}', consumer="logger", job_name="msg-job")
         result = json.loads(tool_map["query_messages"]())
         assert len(result) == 2
         assert all(r["source_job_name"] == "msg-job" for r in result)
         db.close()
 
     def test_query_messages_by_job(self, tools):
-        tool_map, db = tools
-        tool_map["register_job"](name="qm-a", cron_expression="* * * * *", command="echo a")
-        tool_map["register_job"](name="qm-b", cron_expression="* * * * *", command="echo b")
-        ja = db.get_job_by_name("qm-a")
-        jb = db.get_job_by_name("qm-b")
-        db.create_message(ja.id, "from-a")
-        db.create_message(jb.id, "from-b")
+        tool_map, db, store = tools
+        self._deliver(store, "from-a", job_name="qm-a")
+        self._deliver(store, "from-b", job_name="qm-b")
         result = json.loads(tool_map["query_messages"](source_job_name="qm-a"))
         assert len(result) == 1
         assert result[0]["source_job_name"] == "qm-a"
         db.close()
 
     def test_query_messages_by_consumer(self, tools):
-        tool_map, db = tools
-        tool_map["register_job"](name="qm-c", cron_expression="* * * * *", command="echo c")
-        job = db.get_job_by_name("qm-c")
-        db.create_message(job.id, "for-agent", consumer="agent")
-        db.create_message(job.id, "for-logger", consumer="logger")
+        tool_map, db, store = tools
+        self._deliver(store, "for-agent", consumer="agent", job_name="qm-c")
+        self._deliver(store, "for-logger", consumer="logger", job_name="qm-c")
         result = json.loads(tool_map["query_messages"](consumer="agent"))
         assert len(result) == 1
         assert result[0]["consumer"] == "agent"
         db.close()
 
     def test_query_messages_unconsumed(self, tools):
-        tool_map, db = tools
-        tool_map["register_job"](name="qm-d", cron_expression="* * * * *", command="echo d")
-        job = db.get_job_by_name("qm-d")
-        m1 = db.create_message(job.id, "consumed")
-        db.create_message(job.id, "unconsumed")
-        db.mark_consumed(m1.id)
+        tool_map, db, store = tools
+        # Deliver two messages to "agent" mailbox
+        self._deliver(store, "will-consume", consumer="agent", job_name="qm-d")
+        self._deliver(store, "unconsumed", consumer="agent", job_name="qm-d")
+        # Consume one by moving to processed
+        msgs = store.fetch_messages("agent")
+        store.consume("agent", msgs[0]["key"])
         result = json.loads(tool_map["query_messages"](unconsumed=True))
         assert len(result) == 1
         assert result[0]["consumed"] is False
         db.close()
 
     def test_query_messages_parses_payload(self, tools):
-        tool_map, db = tools
-        tool_map["register_job"](name="qm-e", cron_expression="* * * * *", command="echo e")
-        job = db.get_job_by_name("qm-e")
-        db.create_message(job.id, '{"key": "value"}')
+        tool_map, db, store = tools
+        self._deliver(store, '{"key": "value"}', job_name="qm-e")
         result = json.loads(tool_map["query_messages"]())
         assert result[0]["payload"] == {"key": "value"}
         db.close()
 
     def test_send_message_with_consumer(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         result = json.loads(tool_map["send_message"](
             payload='{"action": "run"}',
             consumer="overlord",
@@ -438,14 +438,14 @@ class TestToolsIntegration:
         assert result["id"] is not None
         assert result["source_job_id"] is None
         assert result["consumer"] == "overlord"
-        # Verify in DB
-        msgs = db.query_messages(consumer="overlord")
-        assert len(msgs) == 1
-        assert msgs[0].source_job_id is None
+        # Verify in spool directory
+        spool_dir = db.db_path.parent / "spool"
+        spool_files = list(spool_dir.glob("*.eml"))
+        assert len(spool_files) == 1
         db.close()
 
     def test_send_message_without_consumer(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         result = json.loads(tool_map["send_message"](payload="hello"))
         assert result["id"] is not None
         assert result["consumer"] is None
@@ -453,65 +453,62 @@ class TestToolsIntegration:
         db.close()
 
     def test_send_message_picked_up_by_consumer_job(self, tools):
-        tool_map, db = tools
-        # Send a message addressed to "overlord"
+        tool_map, db, store = tools
+        # Send a message addressed to "overlord" (lands in spool)
         tool_map["send_message"](payload="kick", consumer="overlord")
-        # Verify it appears in unconsumed messages for "overlord" consumer
-        msgs = db.fetch_unconsumed_for_consumers(["overlord"])
-        assert len(msgs) == 1
-        assert msgs[0].payload == "kick"
-        assert msgs[0].source_job_id is None
+        # Verify spool file contains the right headers
+        spool_dir = db.db_path.parent / "spool"
+        spool_files = list(spool_dir.glob("*.eml"))
+        assert len(spool_files) == 1
+        content = spool_files[0].read_text()
+        assert "X-Overlord-Consumer: overlord" in content
         db.close()
 
     def test_query_messages_shows_cli_messages(self, tools):
-        tool_map, db = tools
-        tool_map["send_message"](payload="cli-msg", consumer="test")
+        tool_map, db, store = tools
+        # Deliver a CLI message directly to Maildir
+        self._deliver(store, "cli-msg", consumer="test", job_name="cli")
         result = json.loads(tool_map["query_messages"]())
         assert len(result) == 1
-        assert result[0]["source_job_id"] is None
-        assert result[0]["source_job_name"] == "(cli)"
+        assert result[0]["source_job_name"] == "cli"
         db.close()
 
     def test_query_messages_no_consumer(self, tools):
-        tool_map, db = tools
-        tool_map["register_job"](name="nc-job", cron_expression="* * * * *", command="echo x")
-        job = db.get_job_by_name("nc-job")
-        db.create_message(job.id, "unaddressed")
-        db.create_message(job.id, "addressed", consumer="agent")
+        tool_map, db, store = tools
+        # Deliver one unaddressed (catchall) and one addressed message
+        self._deliver(store, "unaddressed", job_name="nc-job")
+        self._deliver(store, "addressed", consumer="agent", job_name="nc-job")
         result = json.loads(tool_map["query_messages"](no_consumer=True))
         assert len(result) == 1
         assert result[0]["consumer"] is None
         db.close()
 
     def test_consume_messages(self, tools):
-        tool_map, db = tools
-        tool_map["register_job"](name="cm-job", cron_expression="* * * * *", command="echo y")
-        job = db.get_job_by_name("cm-job")
-        db.create_message(job.id, '{"data": 1}', consumer="agent")
-        db.create_message(job.id, '{"data": 2}', consumer="agent")
-        db.create_message(job.id, '{"data": 3}', consumer="logger")
+        tool_map, db, store = tools
+        self._deliver(store, '{"data": 1}', consumer="agent", job_name="cm-job")
+        self._deliver(store, '{"data": 2}', consumer="agent", job_name="cm-job")
+        self._deliver(store, '{"data": 3}', consumer="logger", job_name="cm-job")
         result = json.loads(tool_map["consume_messages"](consumer="agent"))
         assert len(result) == 2
         assert all(r["consumed"] is True for r in result)
-        assert all(r["consumed_at"] is not None for r in result)
-        # Verify they are actually consumed in DB
-        remaining = db.fetch_unconsumed_for_consumers(["agent"])
+        # Verify they are actually consumed (moved to processed)
+        remaining = store.fetch_messages("agent")
         assert len(remaining) == 0
         # logger message should still be unconsumed
-        logger_msgs = db.fetch_unconsumed_for_consumers(["logger"])
+        logger_msgs = store.fetch_messages("logger")
         assert len(logger_msgs) == 1
         db.close()
 
     def test_consume_messages_empty(self, tools):
-        tool_map, db = tools
+        tool_map, db, store = tools
         result = json.loads(tool_map["consume_messages"]())
         assert result == []
         db.close()
 
     def test_consume_messages_no_consumer(self, tools):
-        tool_map, db = tools
-        tool_map["send_message"](payload="unaddressed1")
-        tool_map["send_message"](payload="addressed1", consumer="x")
+        tool_map, db, store = tools
+        self._deliver(store, "unaddressed1")
+        self._deliver(store, "addressed1", consumer="x")
         result = json.loads(tool_map["consume_messages"](no_consumer=True))
         assert len(result) == 1
         assert result[0]["consumer"] is None

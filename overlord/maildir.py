@@ -224,6 +224,25 @@ class MaildirStore:
         md = self._get_maildir(consumer)
         return len(md)
 
+    def fetch_processed_messages(self, consumer: str) -> list[dict]:
+        """Fetch consumed (processed) messages from a consumer's Maildir.
+
+        Returns a list of dicts with keys: ``key``, ``consumer``,
+        ``payload``, ``subject``, ``date``.
+        """
+        processed = self._get_processed_maildir(consumer)
+        results = []
+        for key, msg in processed.iteritems():
+            payload = self._extract_payload(msg)
+            results.append({
+                "key": key,
+                "consumer": consumer if consumer != CATCHALL else None,
+                "payload": payload,
+                "subject": msg.get("Subject", ""),
+                "date": msg.get("Date", ""),
+            })
+        return results
+
     def fetch_unconsumed_for_consumers(
         self, consumer_names: list[str],
     ) -> list[dict]:

@@ -4,12 +4,12 @@ import asyncio
 import json
 import logging
 import sqlite3
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from .database import DEFAULT_DB_PATH, Database
 from .executor import run_job
+from .maildir import CATCHALL, MaildirStore
 from .models import ExecutionStatus, Job, JobStatus
 from .spool import SpoolWriter
 
@@ -105,6 +105,7 @@ def create_mcp_server(
         db.init_schema()
     if spool is None:
         spool = SpoolWriter(data_dir=db.db_path.parent)
+    maildir_store = MaildirStore(data_dir=db.db_path.parent)
 
     @mcp.tool()
     def register_job(
@@ -316,18 +317,19 @@ def create_mcp_server(
         no_consumer: bool = False,
         limit: int = 20,
     ) -> str:
-        """Query messages with optional filters.
+        """Query messages from Maildir with optional filters.
 
         Parameters
         ----------
         source_job_name : str, optional
-            Filter by originating job name.
+            Filter by originating job name (from X-Overlord-Job header).
         consumer : str, optional
-            Filter by consumer tag.
+            Filter by consumer tag (reads from that consumer's Maildir).
         unconsumed : bool, optional
-            If true, return only unconsumed messages. If false, only consumed.
+            If true, return only unconsumed messages. If false, only consumed
+            (from the processed subfolder).
         no_consumer : bool
-            If true, return only messages where consumer is NULL (unaddressed).
+            If true, return only messages from the catchall mailbox.
         limit : int
             Maximum number of results (default 20).
 
@@ -336,43 +338,59 @@ def create_mcp_server(
         str
             JSON array of message objects.
         """
-        consumed = None
-        if unconsumed is not None:
-            consumed = not unconsumed
-        messages = db.query_messages(
-            source_job_name=source_job_name,
-            consumer=consumer,
-            consumed=consumed,
-            no_consumer=no_consumer,
-            limit=limit,
-        )
-        # Build job id→name map for the result set
-        job_name_cache: dict[int, str] = {}
+        # Determine which mailboxes to read
+        if no_consumer:
+            targets = [CATCHALL]
+        elif consumer:
+            targets = [consumer]
+        else:
+            targets = maildir_store.list_mailboxes()
+
+        # Determine whether to read unconsumed, consumed, or both
+        show_unconsumed = unconsumed is None or unconsumed is True
+        show_consumed = unconsumed is None or unconsumed is False
+
+        raw_messages: list[tuple[dict, bool]] = []
+        for target in targets:
+            if show_unconsumed:
+                for m in maildir_store.fetch_messages(target):
+                    raw_messages.append((m, False))
+            if show_consumed:
+                for m in maildir_store.fetch_processed_messages(target):
+                    raw_messages.append((m, True))
+
+        # Filter by source job name if specified
+        if source_job_name:
+            filtered = []
+            for m, consumed_flag in raw_messages:
+                subject = m.get("subject", "")
+                # Subject format: "job_name timestamp"
+                job_from_subject = subject.split(" ", 1)[0] if subject else ""
+                if job_from_subject == source_job_name:
+                    filtered.append((m, consumed_flag))
+            raw_messages = filtered
+
+        # Apply limit
+        raw_messages = raw_messages[:limit]
+
         result = []
-        for msg in messages:
-            payload = msg.payload
+        for m, consumed_flag in raw_messages:
+            payload = m["payload"]
             try:
                 payload = json.loads(payload)
             except (json.JSONDecodeError, TypeError):
                 pass
-            # Resolve source job name
-            if msg.source_job_id is None:
-                job_name = "(cli)"
-            else:
-                job_name = job_name_cache.get(msg.source_job_id)
-                if job_name is None:
-                    job = db.get_job(msg.source_job_id)
-                    job_name = job.name if job else None
-                    job_name_cache[msg.source_job_id] = job_name
+            subject = m.get("subject", "")
+            job_name = subject.split(" ", 1)[0] if subject else "(unknown)"
             result.append({
-                "id": msg.id,
-                "source_job_id": msg.source_job_id,
+                "id": m["key"],
+                "source_job_id": None,
                 "source_job_name": job_name,
                 "payload": payload,
-                "consumer": msg.consumer,
-                "consumed": msg.consumed,
-                "created_at": str(msg.created_at) if msg.created_at else None,
-                "consumed_at": str(msg.consumed_at) if msg.consumed_at else None,
+                "consumer": m.get("consumer"),
+                "consumed": consumed_flag,
+                "created_at": m.get("date"),
+                "consumed_at": None,
             })
         return json.dumps(result)
 
@@ -383,19 +401,19 @@ def create_mcp_server(
         no_consumer: bool = False,
         limit: int = 20,
     ) -> str:
-        """Consume matching unconsumed messages, marking them as consumed.
+        """Consume matching unconsumed messages from Maildir.
 
-        Queries unconsumed messages using the same filters as ``query_messages``,
-        marks them all as consumed, and returns the consumed messages.
+        Fetches unconsumed messages, moves them to the processed subfolder,
+        and returns the consumed messages.
 
         Parameters
         ----------
         source_job_name : str, optional
-            Filter by originating job name.
+            Filter by originating job name (from X-Overlord-Job header).
         consumer : str, optional
-            Filter by consumer tag.
+            Filter by consumer tag (reads from that consumer's Maildir).
         no_consumer : bool
-            If true, match only messages where consumer is NULL (unaddressed).
+            If true, match only messages from the catchall mailbox.
         limit : int
             Maximum number of messages to consume (default 20).
 
@@ -404,42 +422,51 @@ def create_mcp_server(
         str
             JSON array of the consumed message objects.
         """
-        messages = db.query_messages(
-            source_job_name=source_job_name,
-            consumer=consumer,
-            consumed=False,
-            no_consumer=no_consumer,
-            limit=limit,
-        )
-        if messages:
-            db.mark_consumed_bulk([m.id for m in messages])
-        consumed_at_str = str(datetime.now()) if messages else None
-        # Build result in the same format as query_messages
-        job_name_cache: dict[int, str] = {}
+        if no_consumer:
+            targets = [CATCHALL]
+        elif consumer:
+            targets = [consumer]
+        else:
+            targets = maildir_store.list_mailboxes()
+
+        raw_messages: list[tuple[dict, str]] = []
+        for target in targets:
+            for m in maildir_store.fetch_messages(target):
+                raw_messages.append((m, target))
+
+        # Filter by source job name if specified
+        if source_job_name:
+            filtered = []
+            for m, target in raw_messages:
+                subject = m.get("subject", "")
+                job_from_subject = subject.split(" ", 1)[0] if subject else ""
+                if job_from_subject == source_job_name:
+                    filtered.append((m, target))
+            raw_messages = filtered
+
+        # Apply limit
+        raw_messages = raw_messages[:limit]
+
+        # Consume (move to processed) and build result
         result = []
-        for msg in messages:
-            payload = msg.payload
+        for m, target in raw_messages:
+            maildir_store.consume(target, m["key"])
+            payload = m["payload"]
             try:
                 payload = json.loads(payload)
             except (json.JSONDecodeError, TypeError):
                 pass
-            if msg.source_job_id is None:
-                job_name = "(cli)"
-            else:
-                job_name = job_name_cache.get(msg.source_job_id)
-                if job_name is None:
-                    job = db.get_job(msg.source_job_id)
-                    job_name = job.name if job else None
-                    job_name_cache[msg.source_job_id] = job_name
+            subject = m.get("subject", "")
+            job_name = subject.split(" ", 1)[0] if subject else "(unknown)"
             result.append({
-                "id": msg.id,
-                "source_job_id": msg.source_job_id,
+                "id": m["key"],
+                "source_job_id": None,
                 "source_job_name": job_name,
                 "payload": payload,
-                "consumer": msg.consumer,
+                "consumer": m.get("consumer"),
                 "consumed": True,
-                "created_at": str(msg.created_at) if msg.created_at else None,
-                "consumed_at": consumed_at_str,
+                "created_at": m.get("date"),
+                "consumed_at": None,
             })
         logger.info("Consumed %d messages", len(result))
         return json.dumps(result)
@@ -449,7 +476,7 @@ def create_mcp_server(
         payload: str,
         consumer: Optional[str] = None,
     ) -> str:
-        """Send a message directly into the hub without a source job.
+        """Send a message via the file-based spool for delivery to Maildir.
 
         Parameters
         ----------
@@ -462,21 +489,22 @@ def create_mcp_server(
         Returns
         -------
         str
-            JSON object with the created message details.
+            JSON object confirming the spooled message.
         """
-        msg = db.create_message(
-            source_job_id=None,
+        email_msg = MaildirStore.build_message(
             payload=payload,
             consumer=consumer,
+            job_name="cli",
         )
-        logger.info("CLI message created (id=%s, consumer=%r)", msg.id, consumer)
+        spool_path = spool.write(email_msg)
+        logger.info("Message spooled file=%s consumer=%r", spool_path.name, consumer)
         return json.dumps({
-            "id": msg.id,
-            "source_job_id": msg.source_job_id,
+            "id": spool_path.stem,
+            "source_job_id": None,
             "payload": payload,
-            "consumer": msg.consumer,
-            "consumed": msg.consumed,
-            "created_at": str(msg.created_at) if msg.created_at else None,
+            "consumer": consumer,
+            "consumed": False,
+            "created_at": None,
         })
 
     @mcp.tool()

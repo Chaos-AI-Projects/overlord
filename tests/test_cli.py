@@ -18,12 +18,14 @@ from overlord.cli import (
     cmd_list,
     cmd_messages,
     cmd_register,
+    cmd_send,
     cmd_status,
     cmd_trigger,
     cmd_unregister,
     cmd_update,
 )
 from overlord.database import Database
+from overlord.maildir import CATCHALL, MaildirStore
 from overlord.mcp_server import create_mcp_server
 from overlord.models import ExecutionStatus, Job
 
@@ -436,43 +438,36 @@ class TestCommandHandlers:
         cmd_unregister(args)
         assert "Unregistered" in capsys.readouterr().out
 
-    @mock.patch("overlord.cli._call_tool")
-    def test_cmd_messages(self, mock_call, capsys):
-        messages = [{"id": 1, "source_job_id": 3, "consumed": False,
-                     "consumer": "agent", "created_at": "2026-01-01"}]
-        mock_call.return_value = json.dumps(messages)
+    def test_cmd_messages(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr("overlord.maildir.DEFAULT_DATA_DIR", tmp_path)
+        store = MaildirStore(data_dir=tmp_path)
+        msg = MaildirStore.build_message('{"test": true}', consumer="agent", job_name="my-job")
+        store.deliver(msg, consumer="agent")
         args = build_parser().parse_args(["messages", "--job", "my-job", "--unconsumed"])
         cmd_messages(args)
-        call_args = mock_call.call_args[0][2]
-        assert call_args["source_job_name"] == "my-job"
-        assert call_args["unconsumed"] is True
         assert "agent" in capsys.readouterr().out
 
-    @mock.patch("overlord.cli._call_tool")
-    def test_cmd_messages_no_filters(self, mock_call, capsys):
-        mock_call.return_value = "[]"
+    def test_cmd_messages_no_filters(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr("overlord.maildir.DEFAULT_DATA_DIR", tmp_path)
         args = build_parser().parse_args(["messages"])
         cmd_messages(args)
-        assert mock_call.call_args[0][2] == {}
+        assert "No messages found" in capsys.readouterr().out
 
-    @mock.patch("overlord.cli._call_tool")
-    def test_cmd_messages_text_flag(self, mock_call, capsys):
-        messages = [{"id": 1, "source_job_name": "my-job", "consumed": False,
-                     "consumer": "agent", "created_at": "2026-01-01",
-                     "payload": {"message": "hello"}}]
-        mock_call.return_value = json.dumps(messages)
+    def test_cmd_messages_text_flag(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr("overlord.maildir.DEFAULT_DATA_DIR", tmp_path)
+        store = MaildirStore(data_dir=tmp_path)
+        msg = MaildirStore.build_message('{"message": "hello"}', consumer="agent", job_name="my-job")
+        store.deliver(msg, consumer="agent")
         args = build_parser().parse_args(["messages", "--text"])
         cmd_messages(args)
         out = capsys.readouterr().out
-        assert "--- Message 1 ---" in out
         assert "hello" in out
 
-    @mock.patch("overlord.cli._call_tool")
-    def test_cmd_messages_jsonl_flag(self, mock_call, capsys):
-        messages = [{"id": 1, "source_job_name": "my-job", "consumed": False,
-                     "consumer": "agent", "created_at": "2026-01-01",
-                     "payload": {"key": "val"}}]
-        mock_call.return_value = json.dumps(messages)
+    def test_cmd_messages_jsonl_flag(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr("overlord.maildir.DEFAULT_DATA_DIR", tmp_path)
+        store = MaildirStore(data_dir=tmp_path)
+        msg = MaildirStore.build_message('{"key": "val"}', consumer="agent", job_name="my-job")
+        store.deliver(msg, consumer="agent")
         args = build_parser().parse_args(["messages", "--jsonl"])
         cmd_messages(args)
         out = capsys.readouterr().out
@@ -481,43 +476,38 @@ class TestCommandHandlers:
         parsed = json.loads(lines[0])
         assert parsed["payload"]["key"] == "val"
 
-    @mock.patch("overlord.cli._call_tool")
-    def test_cmd_messages_jsonl_empty(self, mock_call, capsys):
-        mock_call.return_value = "[]"
-        args = build_parser().parse_args(["messages", "--jsonl"])
-        cmd_messages(args)
-        out = capsys.readouterr().out
-        assert out.strip() == ""
-
-    @mock.patch("overlord.cli._call_tool")
-    def test_cmd_messages_consume_flag(self, mock_call, capsys):
-        messages = [{"id": 1, "source_job_name": "my-job", "consumed": True,
-                     "consumer": None, "created_at": "2026-01-01"}]
-        mock_call.return_value = json.dumps(messages)
+    def test_cmd_messages_consume_flag(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr("overlord.maildir.DEFAULT_DATA_DIR", tmp_path)
+        store = MaildirStore(data_dir=tmp_path)
+        msg = MaildirStore.build_message("payload", job_name="my-job")
+        store.deliver(msg)  # catchall
         args = build_parser().parse_args(["messages", "--consume", "--no-consumer"])
         cmd_messages(args)
-        assert mock_call.call_args[0][1] == "consume_messages"
+        # Message should have been consumed (moved to processed)
+        remaining = store.fetch_messages(CATCHALL)
+        assert len(remaining) == 0
 
-    @mock.patch("overlord.cli._call_tool")
-    def test_cmd_messages_consume_strips_unconsumed(self, mock_call, capsys):
-        mock_call.return_value = "[]"
+    def test_cmd_messages_consume_strips_unconsumed(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr("overlord.maildir.DEFAULT_DATA_DIR", tmp_path)
         args = build_parser().parse_args(["messages", "--consume", "--unconsumed", "--no-consumer"])
         cmd_messages(args)
-        call_args = mock_call.call_args[0][2]
-        assert "unconsumed" not in call_args
+        # Should not error; just produce empty output
+        assert "No messages found" in capsys.readouterr().out
 
     def test_cmd_messages_consume_requires_consumer_filter(self, capsys):
         args = build_parser().parse_args(["messages", "--consume"])
         with pytest.raises(SystemExit):
             cmd_messages(args)
 
-    @mock.patch("overlord.cli._call_tool")
-    def test_cmd_messages_no_consumer_flag(self, mock_call, capsys):
-        mock_call.return_value = "[]"
+    def test_cmd_messages_no_consumer_flag(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr("overlord.maildir.DEFAULT_DATA_DIR", tmp_path)
+        store = MaildirStore(data_dir=tmp_path)
+        msg = MaildirStore.build_message("unaddressed", job_name="test")
+        store.deliver(msg)  # catchall
         args = build_parser().parse_args(["messages", "--no-consumer"])
         cmd_messages(args)
-        call_args = mock_call.call_args[0][2]
-        assert call_args["no_consumer"] is True
+        out = capsys.readouterr().out
+        assert "test" in out
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_update(self, mock_call, capsys):

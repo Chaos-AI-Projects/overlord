@@ -404,7 +404,10 @@ def cmd_trigger(args: argparse.Namespace) -> None:
 
 
 def cmd_send(args: argparse.Namespace) -> None:
-    """Send a message into the hub."""
+    """Send a message by writing directly to the file-based spool."""
+    from . import maildir as _maildir
+    from . import spool as _spool
+
     payload = args.payload
     if payload is None:
         if sys.stdin.isatty():
@@ -413,49 +416,89 @@ def cmd_send(args: argparse.Namespace) -> None:
             sys.exit(1)
         payload = sys.stdin.read()
 
-    arguments: dict = {"payload": payload}
-    if args.consumer:
-        arguments["consumer"] = args.consumer
-
-    raw = asyncio.run(_call_tool(args.mcp_url, "send_message", arguments))
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        print(raw)
-        return
-    if "error" in data:
-        print(f"Error: {data['error']}", file=sys.stderr)
-        sys.exit(1)
-    consumer_info = f" → {data.get('consumer')}" if data.get("consumer") else ""
-    print(f"Message sent (id={data['id']}{consumer_info})")
+    spool_writer = _spool.SpoolWriter()
+    email_msg = _maildir.MaildirStore.build_message(
+        payload=payload,
+        consumer=args.consumer,
+        job_name="cli",
+    )
+    spool_path = spool_writer.write(email_msg)
+    consumer_info = f" → {args.consumer}" if args.consumer else ""
+    print(f"Message spooled ({spool_path.name}{consumer_info})")
 
 
 def cmd_messages(args: argparse.Namespace) -> None:
-    """Query messages."""
-    arguments: dict = {}
-    if args.job:
-        arguments["source_job_name"] = args.job
-    if args.consumer:
-        arguments["consumer"] = args.consumer
-    if args.no_consumer:
-        arguments["no_consumer"] = True
-    if args.unconsumed:
-        arguments["unconsumed"] = True
-    if args.limit is not None:
-        arguments["limit"] = args.limit
+    """Query messages by reading directly from Maildir directories."""
+    from . import maildir as _maildir
+
+    store = _maildir.MaildirStore()
+    CATCHALL = _maildir.CATCHALL
 
     if args.consume:
         if not args.consumer and not args.no_consumer:
             print("Error: --consume requires --consumer or --no-consumer", file=sys.stderr)
             sys.exit(1)
-        tool_name = "consume_messages"
-        # consume_messages doesn't use unconsumed flag (always unconsumed)
-        arguments.pop("unconsumed", None)
-    else:
-        tool_name = "query_messages"
 
-    raw = asyncio.run(_call_tool(args.mcp_url, tool_name, arguments))
-    _print_messages(raw, text=args.text, as_jsonl=args.jsonl)
+    # Determine which mailboxes to read
+    if args.no_consumer:
+        targets = [CATCHALL]
+    elif args.consumer:
+        targets = [args.consumer]
+    else:
+        targets = store.list_mailboxes()
+
+    # Determine whether to show unconsumed, consumed, or both
+    # --unconsumed: show only unconsumed; default (no flag): show both
+    show_unconsumed = True
+    show_consumed = not args.unconsumed
+
+    raw_messages: list[tuple[dict, bool, str]] = []  # (msg, consumed_flag, target)
+    for target in targets:
+        if args.consume or show_unconsumed:
+            for m in store.fetch_messages(target):
+                raw_messages.append((m, False, target))
+        if show_consumed:
+            for m in store.fetch_processed_messages(target):
+                raw_messages.append((m, True, target))
+
+    # Filter by source job name
+    if args.job:
+        raw_messages = [
+            (m, c, t) for m, c, t in raw_messages
+            if m.get("subject", "").split(" ", 1)[0] == args.job
+        ]
+
+    # Apply limit
+    limit = args.limit if args.limit is not None else 20
+    raw_messages = raw_messages[:limit]
+
+    # If consuming, move messages to processed
+    if args.consume:
+        for m, _, target in raw_messages:
+            store.consume(target, m["key"])
+
+    # Build result in the format expected by _print_messages
+    result = []
+    for m, consumed_flag, _ in raw_messages:
+        payload = m["payload"]
+        try:
+            payload = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        subject = m.get("subject", "")
+        job_name = subject.split(" ", 1)[0] if subject else "(unknown)"
+        result.append({
+            "id": m["key"],
+            "source_job_id": None,
+            "source_job_name": job_name,
+            "payload": payload,
+            "consumer": m.get("consumer"),
+            "consumed": True if args.consume else consumed_flag,
+            "created_at": m.get("date"),
+            "consumed_at": None,
+        })
+
+    _print_messages(json.dumps(result), text=args.text, as_jsonl=args.jsonl)
 
 
 # -- Argument parser --
@@ -534,10 +577,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_trig.set_defaults(func=cmd_trigger)
 
     # send
-    p_send = sub.add_parser("send", help="Send a message into the hub")
+    p_send = sub.add_parser("send", help="Send a message via file-based spool")
     p_send.add_argument("--consumer", metavar="NAME", help="Consumer name the message is addressed to")
     p_send.add_argument("--payload", metavar="TEXT", help="Message payload (reads stdin if omitted)")
-    p_send.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
     p_send.set_defaults(func=cmd_send)
 
     # messages
@@ -552,7 +594,6 @@ def build_parser() -> argparse.ArgumentParser:
     output_group = p_msg.add_mutually_exclusive_group()
     output_group.add_argument("--text", action="store_true", help="Print full message contents in plain-text format")
     output_group.add_argument("--jsonl", action="store_true", help="Print messages as JSON Lines (one object per line)")
-    p_msg.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help=f"MCP server URL (default: {DEFAULT_MCP_URL})")
     p_msg.set_defaults(func=cmd_messages)
 
     return parser
