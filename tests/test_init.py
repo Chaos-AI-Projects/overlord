@@ -1,7 +1,6 @@
 """Tests for the `overlord init` command."""
 
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -23,27 +22,27 @@ class TestInitParser:
 
 
 @pytest.fixture()
-def default_db_path(tmp_path, monkeypatch):
-    """Redirect DEFAULT_DB_PATH to a temp directory for test isolation."""
-    db_path = tmp_path / "data" / "overlord" / "overlord.db"
-    import overlord.database as db_mod
+def default_data_dir(tmp_path, monkeypatch):
+    """Redirect DEFAULT_DATA_DIR to a temp directory for test isolation."""
+    data_dir = tmp_path / "data" / "overlord"
+    import overlord.job_store as js_mod
 
-    monkeypatch.setattr(db_mod, "DEFAULT_DB_PATH", db_path)
-    return db_path
+    monkeypatch.setattr(js_mod, "DEFAULT_DATA_DIR", data_dir)
+    return data_dir
 
 
 class TestCmdInit:
-    def test_creates_vault_structure(self, tmp_path, default_db_path):
+    def test_creates_vault_structure(self, tmp_path, default_data_dir):
         vault = tmp_path / "vault"
         args = build_parser().parse_args(["init", str(vault)])
         cmd_init(args)
 
         assert (vault / "CLAUDE.md").exists()
         assert (vault / "overlord_job.sh").exists()
-        # DB is now at DEFAULT_DB_PATH, not in the vault
-        assert default_db_path.exists()
+        # Job store directory should exist
+        assert (default_data_dir / "jobs").exists()
 
-    def test_claude_md_content(self, tmp_path, default_db_path):
+    def test_claude_md_content(self, tmp_path, default_data_dir):
         vault = tmp_path / "vault"
         args = build_parser().parse_args(["init", str(vault)])
         cmd_init(args)
@@ -53,7 +52,7 @@ class TestCmdInit:
         assert "Job Output Format" in content
         assert "periodical" in content.lower()
 
-    def test_skills_installed(self, tmp_path, default_db_path):
+    def test_skills_installed(self, tmp_path, default_data_dir):
         vault = tmp_path / "vault"
         args = build_parser().parse_args(["init", str(vault)])
         cmd_init(args)
@@ -64,7 +63,7 @@ class TestCmdInit:
         assert (commands_dir / "unregister-job.md").exists()
         assert (commands_dir / "update-job.md").exists()
 
-    def test_skills_content(self, tmp_path, default_db_path):
+    def test_skills_content(self, tmp_path, default_data_dir):
         vault = tmp_path / "vault"
         args = build_parser().parse_args(["init", str(vault)])
         cmd_init(args)
@@ -74,7 +73,7 @@ class TestCmdInit:
         update = (vault / ".claude" / "commands" / "update-job.md").read_text()
         assert "overlord update" in update
 
-    def test_wrapper_script_executable(self, tmp_path, default_db_path):
+    def test_wrapper_script_executable(self, tmp_path, default_data_dir):
         vault = tmp_path / "vault"
         args = build_parser().parse_args(["init", str(vault)])
         cmd_init(args)
@@ -83,22 +82,20 @@ class TestCmdInit:
         mode = os.stat(vault / "overlord_job.sh").st_mode
         assert mode & 0o111  # executable bit set
 
-    def test_registers_overlord_job(self, tmp_path, default_db_path):
+    def test_registers_overlord_job(self, tmp_path, default_data_dir):
         vault = tmp_path / "vault"
         args = build_parser().parse_args(["init", str(vault)])
         cmd_init(args)
 
-        conn = sqlite3.connect(str(default_db_path))
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM jobs WHERE name = 'overlord'").fetchone()
-        conn.close()
+        job_file = default_data_dir / "jobs" / "overlord.json"
+        assert job_file.exists()
 
-        assert row is not None
-        assert row["cron_expression"] == "*/5 * * * *"
-        assert json.loads(row["consumes"]) == ["overlord"]
-        assert row["status"] == "enabled"
+        data = json.loads(job_file.read_text())
+        assert data["cron_expression"] == "*/5 * * * *"
+        assert data["consumes"] == ["overlord"]
+        assert data["status"] == "enabled"
 
-    def test_idempotent(self, tmp_path, default_db_path, capsys):
+    def test_idempotent(self, tmp_path, default_data_dir, capsys):
         """Running init twice should not duplicate files or jobs."""
         vault = tmp_path / "vault"
         args = build_parser().parse_args(["init", str(vault)])
@@ -108,20 +105,7 @@ class TestCmdInit:
         out = capsys.readouterr().out
         assert "already exists" in out
 
-        # Still only one job
-        conn = sqlite3.connect(str(default_db_path))
-        count = conn.execute("SELECT COUNT(*) FROM jobs WHERE name = 'overlord'").fetchone()[0]
-        conn.close()
-        assert count == 1
-
-    def test_db_schema_version(self, tmp_path, default_db_path):
-        vault = tmp_path / "vault"
-        args = build_parser().parse_args(["init", str(vault)])
-        cmd_init(args)
-
-        conn = sqlite3.connect(str(default_db_path))
-        version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        conn.close()
-
-        from overlord.database import SCHEMA_VERSION
-        assert version == SCHEMA_VERSION
+        # Still only one job file
+        jobs_dir = default_data_dir / "jobs"
+        job_files = [f for f in jobs_dir.iterdir() if f.suffix == ".json"]
+        assert len(job_files) == 1

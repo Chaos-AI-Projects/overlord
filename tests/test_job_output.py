@@ -7,8 +7,9 @@ import pytest
 from email import policy
 from email.parser import BytesParser
 
-from overlord.database import Database
+from overlord.execution_log import ExecutionLog
 from overlord.executor import run_job
+from overlord.lock_store import LockStore
 from overlord.models import (
     ExecutionStatus,
     Job,
@@ -19,11 +20,13 @@ from overlord.spool import SpoolWriter
 
 
 @pytest.fixture
-def db(tmp_path):
-    d = Database(db_path=tmp_path / "test.db")
-    d.init_schema()
-    yield d
-    d.close()
+def execution_log(tmp_path):
+    return ExecutionLog(data_dir=tmp_path)
+
+
+@pytest.fixture
+def lock_store(tmp_path):
+    return LockStore(data_dir=tmp_path)
 
 
 @pytest.fixture
@@ -54,14 +57,14 @@ def read_spool_messages(tmp_path):
     return results
 
 
-def make_job(db, **kwargs) -> Job:
+def make_job(**kwargs) -> Job:
     defaults = dict(
         name="test-job",
         cron_expression="* * * * *",
         command="echo hello",
     )
     defaults.update(kwargs)
-    return db.create_job(Job(**defaults))
+    return Job(**defaults)
 
 
 class TestJobOutputParsing:
@@ -157,10 +160,10 @@ class TestExecutorStructuredOutput:
     """Integration tests: executor + structured output validation."""
 
     @pytest.mark.asyncio
-    async def test_valid_structured_output_success(self, db, spool, tmp_path):
+    async def test_valid_structured_output_success(self, execution_log, lock_store, spool, tmp_path):
         output = json.dumps({"consumer": "watcher", "message": "done"})
-        job = make_job(db, command=f"echo '{output}'")
-        record = await run_job(job, db, spool)
+        job = make_job(command=f"echo '{output}'")
+        record = await run_job(job, execution_log, lock_store, spool)
         assert record.status == ExecutionStatus.SUCCESS
 
         messages = read_spool_messages(tmp_path)
@@ -172,10 +175,10 @@ class TestExecutorStructuredOutput:
         assert payload["message"] == "done"
 
     @pytest.mark.asyncio
-    async def test_null_consumer_success(self, db, spool, tmp_path):
+    async def test_null_consumer_success(self, execution_log, lock_store, spool, tmp_path):
         output = json.dumps({"consumer": None, "message": {"key": "val"}})
-        job = make_job(db, command=f"echo '{output}'")
-        record = await run_job(job, db, spool)
+        job = make_job(command=f"echo '{output}'")
+        record = await run_job(job, execution_log, lock_store, spool)
         assert record.status == ExecutionStatus.SUCCESS
 
         messages = read_spool_messages(tmp_path)
@@ -183,13 +186,13 @@ class TestExecutorStructuredOutput:
         assert messages[0]["consumer"] is None
 
     @pytest.mark.asyncio
-    async def test_invalid_output_marks_execution_failed(self, db, spool, tmp_path):
+    async def test_invalid_output_marks_execution_failed(self, execution_log, lock_store, spool, tmp_path):
         """A job that exits 0 but produces non-schema stdout is marked FAILED."""
-        job = make_job(db, command="echo 'not json'")
-        record = await run_job(job, db, spool)
+        job = make_job(command="echo 'not json'")
+        record = await run_job(job, execution_log, lock_store, spool)
 
         # The execution should be retroactively marked as failed.
-        reloaded = db.get_execution(record.id)
+        reloaded = execution_log.get_execution(record.id)
         assert reloaded.status == ExecutionStatus.FAILED
         assert "schema validation failed" in reloaded.stderr.lower()
 
@@ -200,18 +203,18 @@ class TestExecutorStructuredOutput:
         assert "error" in payload
 
     @pytest.mark.asyncio
-    async def test_plain_text_output_marks_failed(self, db, spool):
-        job = make_job(db, command="echo hello world")
-        record = await run_job(job, db, spool)
+    async def test_plain_text_output_marks_failed(self, execution_log, lock_store, spool):
+        job = make_job(command="echo hello world")
+        record = await run_job(job, execution_log, lock_store, spool)
 
-        reloaded = db.get_execution(record.id)
+        reloaded = execution_log.get_execution(record.id)
         assert reloaded.status == ExecutionStatus.FAILED
 
     @pytest.mark.asyncio
-    async def test_failed_job_no_schema_validation(self, db, spool, tmp_path):
+    async def test_failed_job_no_schema_validation(self, execution_log, lock_store, spool, tmp_path):
         """A job that exits non-zero does NOT get schema-validated."""
-        job = make_job(db, command="echo 'raw output' && exit 1")
-        record = await run_job(job, db, spool)
+        job = make_job(command="echo 'raw output' && exit 1")
+        record = await run_job(job, execution_log, lock_store, spool)
         assert record.status == ExecutionStatus.FAILED
 
         messages = read_spool_messages(tmp_path)
@@ -221,49 +224,13 @@ class TestExecutorStructuredOutput:
         assert payload["stdout"] == "raw output\n"
 
     @pytest.mark.asyncio
-    async def test_consumer_stored(self, db, spool, tmp_path):
+    async def test_consumer_stored(self, execution_log, lock_store, spool, tmp_path):
         output = json.dumps({
             "consumer": "target-job",
             "message": "routed",
         })
-        job = make_job(db, command=f"echo '{output}'")
-        await run_job(job, db, spool)
+        job = make_job(command=f"echo '{output}'")
+        await run_job(job, execution_log, lock_store, spool)
 
         messages = read_spool_messages(tmp_path)
         assert messages[0]["consumer"] == "target-job"
-
-
-class TestDatabaseConsumer:
-    """Test the consumer column in the messages table."""
-
-    def test_create_message_with_consumer(self, db):
-        job = make_job(db)
-        msg = db.create_message(job.id, '{"data": 1}', consumer="x")
-        assert msg.consumer == "x"
-
-    def test_create_message_without_consumer(self, db):
-        job = make_job(db)
-        msg = db.create_message(job.id, '{"data": 1}')
-        assert msg.consumer is None
-
-    def test_poll_returns_consumer(self, db):
-        job = make_job(db)
-        db.create_message(job.id, '{"data": 1}', consumer="consumer-a")
-
-        messages = db.poll_messages()
-        assert len(messages) == 1
-        assert messages[0].consumer == "consumer-a"
-
-    def test_consumer_roundtrip(self, db):
-        job = make_job(db)
-        db.create_message(job.id, "payload", consumer="alpha")
-
-        messages = db.poll_messages()
-        assert messages[0].consumer == "alpha"
-
-    def test_null_consumer_roundtrip(self, db):
-        job = make_job(db)
-        db.create_message(job.id, "payload")
-
-        messages = db.poll_messages()
-        assert messages[0].consumer is None
