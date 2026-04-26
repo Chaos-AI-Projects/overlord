@@ -51,6 +51,7 @@ class ExecutionRecord:
     stdout: Optional[str] = None
     stderr: Optional[str] = None
     id: Optional[int] = None
+    job_name: Optional[str] = None
 
 
 @dataclass
