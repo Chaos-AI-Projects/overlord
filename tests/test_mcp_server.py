@@ -5,30 +5,38 @@ import json
 
 import pytest
 
-from overlord.database import Database
+from overlord.execution_log import ExecutionLog
+from overlord.job_store import JobStore
 from overlord.maildir import MaildirStore
 from overlord.mcp_server import create_mcp_server, _job_to_dict, _execution_to_dict
 from overlord.models import ExecutionRecord, ExecutionStatus, Job, JobStatus
 
 
 @pytest.fixture
-def db(tmp_path):
-    d = Database(db_path=tmp_path / "test.db")
-    d.init_schema()
-    yield d
-    d.close()
+def job_store(tmp_path):
+    return JobStore(data_dir=tmp_path)
+
+
+@pytest.fixture
+def execution_log(tmp_path):
+    return ExecutionLog(data_dir=tmp_path)
 
 
 @pytest.fixture
 def mcp_server(tmp_path):
-    """Create an MCP server backed by a temporary database."""
-    return create_mcp_server(db_path=tmp_path / "mcp_test.db")
+    """Create an MCP server backed by a temporary data directory."""
+    return create_mcp_server(data_dir=tmp_path)
 
 
 @pytest.fixture
-def mcp_server_shared_db(db):
-    """Create an MCP server that shares an existing Database instance."""
-    return create_mcp_server(db=db, host="127.0.0.1", port=9999)
+def mcp_server_shared(tmp_path):
+    """Create an MCP server that shares existing store instances."""
+    js = JobStore(data_dir=tmp_path)
+    el = ExecutionLog(data_dir=tmp_path)
+    return create_mcp_server(
+        job_store=js, execution_log=el,
+        host="127.0.0.1", port=9999,
+    ), js
 
 
 class TestCreateMcpServer:
@@ -36,30 +44,32 @@ class TestCreateMcpServer:
         assert mcp_server is not None
         assert mcp_server.name == "overlord-job-registry"
 
-    def test_server_with_shared_db(self, mcp_server_shared_db):
-        assert mcp_server_shared_db is not None
-        assert mcp_server_shared_db.name == "overlord-job-registry"
-        assert mcp_server_shared_db.settings.host == "127.0.0.1"
-        assert mcp_server_shared_db.settings.port == 9999
+    def test_server_with_shared_stores(self, mcp_server_shared):
+        server, js = mcp_server_shared
+        assert server is not None
+        assert server.name == "overlord-job-registry"
+        assert server.settings.host == "127.0.0.1"
+        assert server.settings.port == 9999
 
     def test_server_custom_host_port(self, tmp_path):
         server = create_mcp_server(
-            db_path=tmp_path / "custom.db", host="0.0.0.0", port=7777,
+            data_dir=tmp_path, host="0.0.0.0", port=7777,
         )
         assert server.settings.host == "0.0.0.0"
         assert server.settings.port == 7777
 
-    def test_shared_db_tools_work(self, db, mcp_server_shared_db):
-        """Tools on a shared-DB server should read/write the same database."""
-        tools = {t.name: t for t in mcp_server_shared_db._tool_manager.list_tools()}
+    def test_shared_stores_tools_work(self, mcp_server_shared):
+        """Tools on a shared-store server should read/write the same store."""
+        server, js = mcp_server_shared
+        tools = {t.name: t for t in server._tool_manager.list_tools()}
         result = json.loads(tools["register_job"].fn(
             name="shared-job",
             cron_expression="* * * * *",
             command="echo shared",
         ))
         assert result["name"] == "shared-job"
-        # Verify the shared db sees the job
-        assert db.get_job_by_name("shared-job") is not None
+        # Verify the shared store sees the job
+        assert js.get_job_by_name("shared-job") is not None
 
 
 class TestRegisterJob:
@@ -68,23 +78,20 @@ class TestRegisterJob:
         assert "register_job" in tools
 
     def test_register_and_retrieve(self, tmp_path):
-        server = create_mcp_server(db_path=tmp_path / "test.db")
-        # Access the tool functions via the internal database
-        db = Database(db_path=tmp_path / "test.db")
-        db.init_schema()
+        server = create_mcp_server(data_dir=tmp_path)
+        js = JobStore(data_dir=tmp_path)
 
         job = Job(
             name="my-job",
             cron_expression="0 * * * *",
             command="echo test",
         )
-        created = db.create_job(job)
-        assert created.id is not None
+        created = js.create_job(job)
+        assert created.name is not None
 
-        fetched = db.get_job_by_name("my-job")
+        fetched = js.get_job_by_name("my-job")
         assert fetched is not None
         assert fetched.command == "echo test"
-        db.close()
 
 
 class TestJobToDict:
@@ -93,13 +100,11 @@ class TestJobToDict:
             name="test-job",
             cron_expression="*/5 * * * *",
             command="echo hello",
-            id=1,
         )
         d = _job_to_dict(job)
         assert d["name"] == "test-job"
         assert d["cron_expression"] == "*/5 * * * *"
         assert d["command"] == "echo hello"
-        assert d["id"] == 1
         assert d["status"] == "enabled"
         assert d["exclusive_lock"] is None
         assert d["consumes"] == []
@@ -109,7 +114,6 @@ class TestJobToDict:
             name="roundtrip",
             cron_expression="0 0 * * *",
             command="date",
-            id=42,
             timeout_seconds=300,
             max_retries=2,
             retry_delay_seconds=10,
@@ -126,7 +130,8 @@ class TestJobToDict:
 class TestExecutionToDict:
     def test_serialisation(self):
         rec = ExecutionRecord(
-            job_id=1,
+            job_id=0,
+            job_name="test-job",
             status=ExecutionStatus.SUCCESS,
             started_at="2026-01-01 00:00:00",
             finished_at="2026-01-01 00:01:00",
@@ -139,42 +144,40 @@ class TestExecutionToDict:
         assert d["id"] == 10
         assert d["status"] == "success"
         assert d["exit_code"] == 0
+        assert d["job_name"] == "test-job"
 
 
 class TestToolsIntegration:
-    """Test the MCP tool functions end-to-end via a shared database."""
+    """Test the MCP tool functions end-to-end via shared stores."""
 
     @pytest.fixture
     def tools(self, tmp_path):
-        """Return a dict mapping tool-name -> callable, plus the backing DB and MaildirStore."""
-        db_path = tmp_path / "integration.db"
-        server = create_mcp_server(db_path=db_path)
-        db = Database(db_path=db_path)
+        """Return a dict mapping tool-name -> callable, plus the backing JobStore and MaildirStore."""
+        server = create_mcp_server(data_dir=tmp_path)
+        js = JobStore(data_dir=tmp_path)
+        el = ExecutionLog(data_dir=tmp_path)
         store = MaildirStore(data_dir=tmp_path)
-        # DB is already initialised by create_mcp_server
 
         # Extract the raw tool callables from FastMCP internals
         tool_map = {}
         for t in server._tool_manager.list_tools():
             tool_map[t.name] = t.fn
-        return tool_map, db, store
+        return tool_map, js, el, store
 
     def test_register_job(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         result = json.loads(tool_map["register_job"](
             name="cron-job",
             cron_expression="*/10 * * * *",
             command="echo cron",
         ))
         assert result["name"] == "cron-job"
-        assert result["id"] is not None
         assert result["consumes"] == []
-        # Verify via DB
-        assert db.get_job_by_name("cron-job") is not None
-        db.close()
+        # Verify via store
+        assert js.get_job_by_name("cron-job") is not None
 
     def test_register_job_with_consumes(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         result = json.loads(tool_map["register_job"](
             name="consumer-job",
             cron_expression="*/5 * * * *",
@@ -182,12 +185,11 @@ class TestToolsIntegration:
             consumes="job-a, job-b",
         ))
         assert result["consumes"] == ["job-a", "job-b"]
-        fetched = db.get_job_by_name("consumer-job")
+        fetched = js.get_job_by_name("consumer-job")
         assert fetched.consumes == ["job-a", "job-b"]
-        db.close()
 
     def test_register_job_with_options(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         result = json.loads(tool_map["register_job"](
             name="fancy-job",
             cron_expression="0 2 * * *",
@@ -200,10 +202,9 @@ class TestToolsIntegration:
         assert result["exclusive_lock"] == "backup"
         assert result["timeout_seconds"] == 600
         assert result["max_retries"] == 3
-        db.close()
 
     def test_register_job_duplicate_name(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         tool_map["register_job"](
             name="dup-job",
             cron_expression="* * * * *",
@@ -216,10 +217,9 @@ class TestToolsIntegration:
         ))
         assert "error" in result
         assert "already exists" in result["error"]
-        db.close()
 
     def test_unregister_job(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         tool_map["register_job"](
             name="doomed",
             cron_expression="* * * * *",
@@ -227,36 +227,33 @@ class TestToolsIntegration:
         )
         result = json.loads(tool_map["unregister_job"](name="doomed"))
         assert result["status"] == "deleted"
-        assert db.get_job_by_name("doomed") is None
-        db.close()
+        assert js.get_job_by_name("doomed") is None
 
     def test_unregister_nonexistent(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         result = json.loads(tool_map["unregister_job"](name="ghost"))
         assert "error" in result
-        db.close()
 
     def test_list_jobs(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         tool_map["register_job"](name="j1", cron_expression="* * * * *", command="echo 1")
         tool_map["register_job"](name="j2", cron_expression="* * * * *", command="echo 2")
         result = json.loads(tool_map["list_jobs"]())
         assert len(result) == 2
         names = {j["name"] for j in result}
         assert names == {"j1", "j2"}
-        db.close()
 
     def test_list_jobs_filter_status(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         tool_map["register_job"](name="active", cron_expression="* * * * *", command="echo a")
-        # Create a disabled job directly via DB
+        # Create a disabled job directly via store
         disabled_job = Job(
             name="inactive",
             cron_expression="* * * * *",
             command="echo b",
             status=JobStatus.DISABLED,
         )
-        db.create_job(disabled_job)
+        js.create_job(disabled_job)
 
         enabled = json.loads(tool_map["list_jobs"](status="enabled"))
         assert len(enabled) == 1
@@ -265,16 +262,14 @@ class TestToolsIntegration:
         disabled = json.loads(tool_map["list_jobs"](status="disabled"))
         assert len(disabled) == 1
         assert disabled[0]["name"] == "inactive"
-        db.close()
 
     def test_list_jobs_invalid_status(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         result = json.loads(tool_map["list_jobs"](status="bogus"))
         assert "error" in result
-        db.close()
 
     def test_get_job_status(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         tool_map["register_job"](
             name="status-check",
             cron_expression="*/5 * * * *",
@@ -283,33 +278,29 @@ class TestToolsIntegration:
         result = json.loads(tool_map["get_job_status"](name="status-check"))
         assert result["name"] == "status-check"
         assert result["recent_executions"] == []
-        db.close()
 
     def test_get_job_status_with_executions(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         tool_map["register_job"](
             name="has-history",
             cron_expression="* * * * *",
             command="echo hi",
         )
-        job = db.get_job_by_name("has-history")
         # Simulate some execution history
-        rec = db.create_execution(job.id)
-        db.finish_execution(rec.id, ExecutionStatus.SUCCESS, exit_code=0, stdout="hi\n")
+        rec = el.create_execution("has-history")
+        el.finish_execution(rec.id, ExecutionStatus.SUCCESS, exit_code=0, stdout="hi\n")
 
         result = json.loads(tool_map["get_job_status"](name="has-history"))
         assert len(result["recent_executions"]) == 1
         assert result["recent_executions"][0]["status"] == "success"
-        db.close()
 
     def test_get_job_status_nonexistent(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         result = json.loads(tool_map["get_job_status"](name="nope"))
         assert "error" in result
-        db.close()
 
     def test_update_job(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         tool_map["register_job"](
             name="updatable",
             cron_expression="* * * * *",
@@ -325,14 +316,13 @@ class TestToolsIntegration:
         assert result["cron_expression"] == "*/10 * * * *"
         assert result["command"] == "echo new"
         assert result["timeout_seconds"] == 120
-        # Verify via DB
-        fetched = db.get_job_by_name("updatable")
+        # Verify via store
+        fetched = js.get_job_by_name("updatable")
         assert fetched.cron_expression == "*/10 * * * *"
         assert fetched.command == "echo new"
-        db.close()
 
     def test_update_job_partial(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         tool_map["register_job"](
             name="partial-update",
             cron_expression="* * * * *",
@@ -347,16 +337,14 @@ class TestToolsIntegration:
         assert result["cron_expression"] == "*/5 * * * *"
         assert result["command"] == "echo original"
         assert result["timeout_seconds"] == 60
-        db.close()
 
     def test_update_job_nonexistent(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         result = json.loads(tool_map["update_job"](name="ghost"))
         assert "error" in result
-        db.close()
 
     def test_update_job_consumes(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         tool_map["register_job"](
             name="consumer-update",
             cron_expression="* * * * *",
@@ -373,7 +361,6 @@ class TestToolsIntegration:
             consumes="",
         ))
         assert result["consumes"] == []
-        db.close()
 
     def _deliver(self, store, payload, consumer=None, job_name="test-job"):
         """Helper to deliver a message directly to Maildir."""
@@ -383,34 +370,31 @@ class TestToolsIntegration:
         store.deliver(msg, consumer=consumer)
 
     def test_query_messages_all(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         self._deliver(store, '{"test": true}', consumer="agent", job_name="msg-job")
         self._deliver(store, '{"test": false}', consumer="logger", job_name="msg-job")
         result = json.loads(tool_map["query_messages"]())
         assert len(result) == 2
         assert all(r["source_job_name"] == "msg-job" for r in result)
-        db.close()
 
     def test_query_messages_by_job(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         self._deliver(store, "from-a", job_name="qm-a")
         self._deliver(store, "from-b", job_name="qm-b")
         result = json.loads(tool_map["query_messages"](source_job_name="qm-a"))
         assert len(result) == 1
         assert result[0]["source_job_name"] == "qm-a"
-        db.close()
 
     def test_query_messages_by_consumer(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         self._deliver(store, "for-agent", consumer="agent", job_name="qm-c")
         self._deliver(store, "for-logger", consumer="logger", job_name="qm-c")
         result = json.loads(tool_map["query_messages"](consumer="agent"))
         assert len(result) == 1
         assert result[0]["consumer"] == "agent"
-        db.close()
 
     def test_query_messages_unconsumed(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         # Deliver two messages to "agent" mailbox
         self._deliver(store, "will-consume", consumer="agent", job_name="qm-d")
         self._deliver(store, "unconsumed", consumer="agent", job_name="qm-d")
@@ -420,71 +404,62 @@ class TestToolsIntegration:
         result = json.loads(tool_map["query_messages"](unconsumed=True))
         assert len(result) == 1
         assert result[0]["consumed"] is False
-        db.close()
 
     def test_query_messages_parses_payload(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         self._deliver(store, '{"key": "value"}', job_name="qm-e")
         result = json.loads(tool_map["query_messages"]())
         assert result[0]["payload"] == {"key": "value"}
-        db.close()
 
-    def test_send_message_with_consumer(self, tools):
-        tool_map, db, store = tools
+    def test_send_message_with_consumer(self, tools, tmp_path):
+        tool_map, js, el, store = tools
         result = json.loads(tool_map["send_message"](
             payload='{"action": "run"}',
             consumer="overlord",
         ))
         assert result["id"] is not None
-        assert result["source_job_id"] is None
         assert result["consumer"] == "overlord"
         # Verify in spool directory
-        spool_dir = db.db_path.parent / "spool"
+        spool_dir = tmp_path / "spool"
         spool_files = list(spool_dir.glob("*.eml"))
         assert len(spool_files) == 1
-        db.close()
 
     def test_send_message_without_consumer(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         result = json.loads(tool_map["send_message"](payload="hello"))
         assert result["id"] is not None
         assert result["consumer"] is None
-        assert result["source_job_id"] is None
-        db.close()
 
-    def test_send_message_picked_up_by_consumer_job(self, tools):
-        tool_map, db, store = tools
+    def test_send_message_picked_up_by_consumer_job(self, tools, tmp_path):
+        tool_map, js, el, store = tools
         # Send a message addressed to "overlord" (lands in spool)
         tool_map["send_message"](payload="kick", consumer="overlord")
         # Verify spool file contains the right headers
-        spool_dir = db.db_path.parent / "spool"
+        spool_dir = tmp_path / "spool"
         spool_files = list(spool_dir.glob("*.eml"))
         assert len(spool_files) == 1
         content = spool_files[0].read_text()
         assert "X-Overlord-Consumer: overlord" in content
-        db.close()
 
     def test_query_messages_shows_cli_messages(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         # Deliver a CLI message directly to Maildir
         self._deliver(store, "cli-msg", consumer="test", job_name="cli")
         result = json.loads(tool_map["query_messages"]())
         assert len(result) == 1
         assert result[0]["source_job_name"] == "cli"
-        db.close()
 
     def test_query_messages_no_consumer(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         # Deliver one unaddressed (catchall) and one addressed message
         self._deliver(store, "unaddressed", job_name="nc-job")
         self._deliver(store, "addressed", consumer="agent", job_name="nc-job")
         result = json.loads(tool_map["query_messages"](no_consumer=True))
         assert len(result) == 1
         assert result[0]["consumer"] is None
-        db.close()
 
     def test_consume_messages(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         self._deliver(store, '{"data": 1}', consumer="agent", job_name="cm-job")
         self._deliver(store, '{"data": 2}', consumer="agent", job_name="cm-job")
         self._deliver(store, '{"data": 3}', consumer="logger", job_name="cm-job")
@@ -497,19 +472,16 @@ class TestToolsIntegration:
         # logger message should still be unconsumed
         logger_msgs = store.fetch_messages("logger")
         assert len(logger_msgs) == 1
-        db.close()
 
     def test_consume_messages_empty(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         result = json.loads(tool_map["consume_messages"]())
         assert result == []
-        db.close()
 
     def test_consume_messages_no_consumer(self, tools):
-        tool_map, db, store = tools
+        tool_map, js, el, store = tools
         self._deliver(store, "unaddressed1")
         self._deliver(store, "addressed1", consumer="x")
         result = json.loads(tool_map["consume_messages"](no_consumer=True))
         assert len(result) == 1
         assert result[0]["consumer"] is None
-        db.close()

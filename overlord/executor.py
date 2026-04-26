@@ -10,7 +10,8 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from .database import Database
+from .execution_log import ExecutionLog
+from .lock_store import LockStore
 from .maildir import MaildirStore
 from .models import ExecutionRecord, ExecutionStatus, Job, JobOutput, JobOutputError
 from .spool import SpoolWriter
@@ -20,7 +21,8 @@ logger = logging.getLogger("overlord.executor")
 
 async def run_job(
     job: Job,
-    db: Database,
+    execution_log: ExecutionLog,
+    lock_store: LockStore,
     spool: SpoolWriter,
     cancel_event: Optional[asyncio.Event] = None,
     input_messages: Optional[list[dict]] = None,
@@ -30,7 +32,9 @@ async def run_job(
 
     Args:
         job: The job definition to execute.
-        db: Database handle (thread-local connections are safe here).
+        execution_log: Execution history log.
+        lock_store: File-based named lock store.
+        spool: Spool writer for message delivery.
         cancel_event: If set, the executor will abort before starting or
             between retries.  Used for graceful shutdown.
         input_messages: Maildir message dicts to pass to the job via stdin
@@ -59,50 +63,50 @@ async def run_job(
             if cancel_event and cancel_event.is_set():
                 break
 
-        record = db.create_execution(job.id)
+        record = execution_log.create_execution(job.name)
         lock_acquired = False
 
         try:
             # Acquire exclusive lock if required.
             if job.exclusive_lock:
-                lock_acquired = db.acquire_lock(job.exclusive_lock, record.id)
+                lock_acquired = lock_store.acquire_lock(job.exclusive_lock, record.id)
                 if not lock_acquired:
                     logger.warning(
                         "job=%s execution=%d lock=%s held, skipping",
                         job.name, record.id, job.exclusive_lock,
                     )
-                    db.finish_execution(
+                    execution_log.finish_execution(
                         record.id, ExecutionStatus.FAILED,
                         stderr=f"Could not acquire lock: {job.exclusive_lock}",
                     )
-                    last_record = _reload_record(db, record)
+                    last_record = _reload_record(execution_log, record)
                     break  # lock contention is not retryable
 
             last_record = await _run_subprocess(
-                job, record, db, cancel_event, input_messages, cwd=cwd,
+                job, record, execution_log, cancel_event, input_messages, cwd=cwd,
             )
 
             if last_record.status == ExecutionStatus.SUCCESS:
                 break  # no retry needed
         finally:
             if lock_acquired and job.exclusive_lock:
-                db.release_lock(job.exclusive_lock)
+                lock_store.release_lock(job.exclusive_lock)
 
     if last_record is None:
         # Cancelled before any attempt ran — create a record to reflect that.
-        record = db.create_execution(job.id)
-        db.finish_execution(record.id, ExecutionStatus.FAILED,
+        record = execution_log.create_execution(job.name)
+        execution_log.finish_execution(record.id, ExecutionStatus.FAILED,
                             stderr="Cancelled before execution")
-        last_record = db.get_execution(record.id)
+        last_record = execution_log.get_execution(record.id)
 
-    last_record = _produce_message(job, last_record, db, spool=spool)
+    last_record = _produce_message(job, last_record, execution_log, spool=spool)
     return last_record
 
 
 async def _run_subprocess(
     job: Job,
     record: ExecutionRecord,
-    db: Database,
+    execution_log: ExecutionLog,
     cancel_event: Optional[asyncio.Event],
     input_messages: Optional[list[dict]] = None,
     cwd: Optional[Path] = None,
@@ -159,26 +163,26 @@ async def _run_subprocess(
     else:
         status = ExecutionStatus.FAILED
 
-    db.finish_execution(record.id, status, exit_code=exit_code,
+    execution_log.finish_execution(record.id, status, exit_code=exit_code,
                         stdout=stdout, stderr=stderr)
 
     logger.info(
         "job=%s execution=%d status=%s exit_code=%s",
         job.name, record.id, status.value, exit_code,
     )
-    return _reload_record(db, record)
+    return _reload_record(execution_log, record)
 
 
-def _reload_record(db: Database, record: ExecutionRecord) -> ExecutionRecord:
-    """Re-read the execution record from the DB to pick up finish timestamp."""
-    reloaded = db.get_execution(record.id)
+def _reload_record(execution_log: ExecutionLog, record: ExecutionRecord) -> ExecutionRecord:
+    """Re-read the execution record to pick up finish timestamp."""
+    reloaded = execution_log.get_execution(record.id)
     return reloaded if reloaded is not None else record
 
 
 def _produce_message(
     job: Job,
     record: ExecutionRecord,
-    db: Database,
+    execution_log: ExecutionLog,
     spool: SpoolWriter,
 ) -> ExecutionRecord:
     """Create a message from a completed job execution.
@@ -203,7 +207,7 @@ def _produce_message(
                 "job=%s execution=%d output schema validation failed: %s",
                 job.name, record.id, exc,
             )
-            db.finish_execution(
+            execution_log.finish_execution(
                 record.id, ExecutionStatus.FAILED,
                 exit_code=record.exit_code,
                 stdout=record.stdout,
@@ -211,7 +215,6 @@ def _produce_message(
             )
             payload = json.dumps({
                 "job_name": job.name,
-                "job_id": job.id,
                 "execution_id": record.id,
                 "status": ExecutionStatus.FAILED.value,
                 "exit_code": record.exit_code,
@@ -219,11 +222,10 @@ def _produce_message(
             })
             _emit_message(payload, job.name, spool=spool)
             logger.debug("job=%s execution=%d produced error message", job.name, record.id)
-            return db.get_execution(record.id)
+            return execution_log.get_execution(record.id)
 
         payload = json.dumps({
             "job_name": job.name,
-            "job_id": job.id,
             "execution_id": record.id,
             "status": record.status.value,
             "exit_code": record.exit_code,
@@ -237,7 +239,6 @@ def _produce_message(
     else:
         payload = json.dumps({
             "job_name": job.name,
-            "job_id": job.id,
             "execution_id": record.id,
             "status": record.status.value,
             "exit_code": record.exit_code,
@@ -246,9 +247,9 @@ def _produce_message(
         })
         _emit_message(payload, job.name, spool=spool)
         logger.debug("job=%s execution=%d produced message", job.name, record.id)
-    # Always return a fresh record from the DB so both success and failure
+    # Always return a fresh record so both success and failure
     # paths behave consistently.
-    refreshed = db.get_execution(record.id)
+    refreshed = execution_log.get_execution(record.id)
     return refreshed if refreshed is not None else record
 
 

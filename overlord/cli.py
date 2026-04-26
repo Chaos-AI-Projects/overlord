@@ -1,13 +1,12 @@
 """CLI for managing Overlord jobs via the MCP interface.
 
 All management commands communicate with the running scheduler daemon through
-its MCP streamable-HTTP endpoint, avoiding direct database access and
-WAL-mode contention.
+its MCP streamable-HTTP endpoint, avoiding direct database access.
 
 Usage::
 
     overlord init [PATH]
-    overlord daemon [--db PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT]
+    overlord daemon [--data-dir PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT]
     overlord list [--status STATUS] [--mcp-url URL]
     overlord status JOB_NAME [--mcp-url URL]
     overlord register --name NAME --cron EXPR --command CMD [options] [--mcp-url URL]
@@ -30,7 +29,7 @@ DEFAULT_MCP_URL = "http://127.0.0.1:8000/mcp/"
 
 
 def _utc_to_local(ts: str) -> str:
-    """Convert a UTC timestamp string from the database to local time for display."""
+    """Convert a UTC timestamp string to local time for display."""
     if not ts:
         return ""
     try:
@@ -97,14 +96,14 @@ def _print_messages(raw: str, text: bool = False, as_jsonl: bool = False) -> Non
         _print_messages_text(messages)
         return
 
-    fmt = "{:<6} {:<20} {:<10} {:<25} {:<30}"
+    fmt = "{:<36} {:<20} {:<10} {:<25} {:<30}"
     print(fmt.format("ID", "JOB", "CONSUMED", "CONSUMER", "CREATED"))
-    print("-" * 93)
+    print("-" * 123)
     for m in messages:
         consumer = m.get("consumer") or ""
-        job_label = m.get("source_job_name") or str(m.get("source_job_id", ""))
+        job_label = m.get("source_job_name") or ""
         print(fmt.format(
-            m.get("id", ""),
+            str(m.get("id", ""))[:36],
             job_label[:20],
             "yes" if m.get("consumed") else "no",
             consumer[:25],
@@ -118,7 +117,7 @@ def _print_messages_text(messages: list[dict]) -> None:
         if i > 0:
             print()
         msg_id = m.get("id", "?")
-        job_label = m.get("source_job_name") or str(m.get("source_job_id", ""))
+        job_label = m.get("source_job_name") or ""
         consumer = m.get("consumer") or "-"
         consumed = "yes" if m.get("consumed") else "no"
         created = _utc_to_local(m.get("created_at", ""))
@@ -156,13 +155,12 @@ def _print_job_table(raw: str) -> None:
         return
 
     # Table header
-    fmt = "{:<5} {:<25} {:<20} {:<10} {:<12} {:<20}"
-    print(fmt.format("ID", "NAME", "CRON", "STATUS", "QUEUE", "CONSUMES"))
-    print("-" * 94)
+    fmt = "{:<25} {:<20} {:<10} {:<12} {:<20}"
+    print(fmt.format("NAME", "CRON", "STATUS", "QUEUE", "CONSUMES"))
+    print("-" * 89)
     for j in jobs:
         consumes = ", ".join(j.get("consumes", []))
         print(fmt.format(
-            j.get("id", ""),
             j.get("name", "")[:25],
             j.get("cron_expression", "")[:20],
             j.get("status", ""),
@@ -184,7 +182,6 @@ def _print_job_status(raw: str) -> None:
         sys.exit(1)
 
     print(f"Job:      {data.get('name')}")
-    print(f"ID:       {data.get('id')}")
     print(f"Status:   {data.get('status')}")
     print(f"Cron:     {data.get('cron_expression')}")
     print(f"Command:  {data.get('command')}")
@@ -225,8 +222,8 @@ def _print_job_status(raw: str) -> None:
 
 
 def cmd_init(args: argparse.Namespace) -> None:
-    """Scaffold a vault directory, initialize the DB, and register the overlord job."""
-    from .database import DEFAULT_DB_PATH, Database
+    """Scaffold a vault directory, initialize stores, and register the overlord job."""
+    from .job_store import DEFAULT_DATA_DIR, JobStore
     from .models import Job
     from .vault_template import VAULT_CLAUDE_MD
 
@@ -263,18 +260,17 @@ def cmd_init(args: argparse.Namespace) -> None:
         dest_script.chmod(0o755)
         print(f"Copied wrapper script to {dest_script}")
 
-    # Initialize database at the shared default location so that
-    # `overlord init && overlord daemon` works without any --db flags.
-    db_path = DEFAULT_DB_PATH
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    db = Database(db_path)
-    db.init_schema()
-    print(f"Initialized database at {db_path}")
+    # Initialize the job store at the shared default location so that
+    # `overlord init && overlord daemon` works without any --data-dir flags.
+    data_dir = DEFAULT_DATA_DIR
+    data_dir.mkdir(parents=True, exist_ok=True)
+    job_store = JobStore(data_dir=data_dir)
+    print(f"Initialized job store at {data_dir}")
 
-    # Register the overlord job (direct DB write, bypassing MCP)
-    existing = db.get_job_by_name("overlord")
+    # Register the overlord job (direct store write, bypassing MCP)
+    existing = job_store.get_job_by_name("overlord")
     if existing:
-        print(f"Job 'overlord' already registered (id={existing.id}), skipping")
+        print(f"Job 'overlord' already registered, skipping")
     else:
         job = Job(
             name="overlord",
@@ -283,10 +279,8 @@ def cmd_init(args: argparse.Namespace) -> None:
             consumes=["overlord"],
             timeout_seconds=300,
         )
-        created = db.create_job(job)
-        print(f"Registered job 'overlord' (id={created.id})")
-
-    db.close()
+        created = job_store.create_job(job)
+        print(f"Registered job 'overlord'")
 
     print(f"\nVault initialized at {vault}")
     print(f"Start the daemon with: overlord daemon")
@@ -300,7 +294,7 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     setup_logging()
 
     scheduler = Scheduler(
-        db_path=Path(args.db) if args.db else None,
+        data_dir=Path(args.data_dir) if args.data_dir else None,
         tick_seconds=args.tick,
         mcp_host=args.mcp_host,
         mcp_port=args.mcp_port,
@@ -348,7 +342,7 @@ def cmd_register(args: argparse.Namespace) -> None:
     if "error" in data:
         print(f"Error: {data['error']}", file=sys.stderr)
         sys.exit(1)
-    print(f"Registered job '{data['name']}' (id={data['id']})")
+    print(f"Registered job '{data['name']}'")
 
 
 def cmd_update(args: argparse.Namespace) -> None:
@@ -380,7 +374,7 @@ def cmd_update(args: argparse.Namespace) -> None:
     if "error" in data:
         print(f"Error: {data['error']}", file=sys.stderr)
         sys.exit(1)
-    print(f"Updated job '{data['name']}' (id={data['id']})")
+    print(f"Updated job '{data['name']}'")
 
 
 def cmd_unregister(args: argparse.Namespace) -> None:
@@ -390,7 +384,7 @@ def cmd_unregister(args: argparse.Namespace) -> None:
     if "error" in data:
         print(f"Error: {data['error']}", file=sys.stderr)
         sys.exit(1)
-    print(f"Unregistered job '{data['name']}' (id={data['id']})")
+    print(f"Unregistered job '{data['name']}'")
 
 
 def cmd_trigger(args: argparse.Namespace) -> None:
@@ -489,7 +483,6 @@ def cmd_messages(args: argparse.Namespace) -> None:
         job_name = subject.split(" ", 1)[0] if subject else "(unknown)"
         result.append({
             "id": m["key"],
-            "source_job_id": None,
             "source_job_name": job_name,
             "payload": payload,
             "consumer": m.get("consumer"),
@@ -512,13 +505,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # init
-    p_init = sub.add_parser("init", help="Scaffold a vault directory with DB and overlord job")
+    p_init = sub.add_parser("init", help="Scaffold a vault directory with stores and overlord job")
     p_init.add_argument("path", nargs="?", default=".", help="Vault directory path (default: current directory)")
     p_init.set_defaults(func=cmd_init)
 
     # daemon
     p_daemon = sub.add_parser("daemon", help="Start the scheduler daemon")
-    p_daemon.add_argument("--db", metavar="PATH", help="Path to SQLite database")
+    p_daemon.add_argument("--data-dir", metavar="PATH", help="Path to data directory")
     p_daemon.add_argument("--tick", type=int, default=60, help="Tick interval in seconds (default: 60)")
     p_daemon.add_argument("--mcp-host", default="127.0.0.1", help="MCP bind address (default: 127.0.0.1)")
     p_daemon.add_argument("--mcp-port", type=int, default=8000, help="MCP port (default: 8000)")

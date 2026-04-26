@@ -24,7 +24,6 @@ from overlord.cli import (
     cmd_unregister,
     cmd_update,
 )
-from overlord.database import Database
 from overlord.maildir import CATCHALL, MaildirStore
 from overlord.mcp_server import create_mcp_server
 from overlord.models import ExecutionStatus, Job
@@ -41,15 +40,15 @@ class TestBuildParser:
         assert args.tick == 60
         assert args.mcp_host == "127.0.0.1"
         assert args.mcp_port == 8000
-        assert args.db is None
+        assert args.data_dir is None
 
     def test_daemon_custom(self):
         parser = build_parser()
         args = parser.parse_args([
-            "daemon", "--db", "/tmp/test.db", "--tick", "30",
+            "daemon", "--data-dir", "/tmp/test-data", "--tick", "30",
             "--mcp-host", "0.0.0.0", "--mcp-port", "9000",
         ])
-        assert args.db == "/tmp/test.db"
+        assert args.data_dir == "/tmp/test-data"
         assert args.tick == 30
         assert args.mcp_host == "0.0.0.0"
         assert args.mcp_port == 9000
@@ -191,16 +190,16 @@ class TestPrintJobTable:
 
     def test_normal_output(self, capsys):
         jobs = [
-            {"id": 1, "name": "backup", "cron_expression": "0 2 * * *",
+            {"name": "backup", "cron_expression": "0 2 * * *",
              "status": "enabled", "consumes": []},
-            {"id": 2, "name": "cleanup", "cron_expression": "0 0 * * 0",
+            {"name": "cleanup", "cron_expression": "0 0 * * 0",
              "status": "disabled", "consumes": ["job-a"]},
         ]
         _print_job_table(json.dumps(jobs))
         out = capsys.readouterr().out
         assert "backup" in out
         assert "cleanup" in out
-        assert "ID" in out
+        assert "NAME" in out
         assert "CONSUMES" in out
 
     def test_error_response(self, capsys):
@@ -213,7 +212,6 @@ class TestPrintJobStatus:
     def test_basic_output(self, capsys):
         data = {
             "name": "my-job",
-            "id": 1,
             "status": "enabled",
             "cron_expression": "* * * * *",
             "command": "echo hello",
@@ -234,7 +232,6 @@ class TestPrintJobStatus:
     def test_with_executions(self, capsys):
         data = {
             "name": "my-job",
-            "id": 1,
             "status": "enabled",
             "cron_expression": "* * * * *",
             "command": "echo hello",
@@ -267,9 +264,9 @@ class TestPrintMessages:
 
     def test_normal_output(self, capsys):
         messages = [
-            {"id": 1, "source_job_id": 5, "source_job_name": "my-job", "consumed": False,
+            {"id": "msg-1", "source_job_name": "my-job", "consumed": False,
              "consumer": "agent", "created_at": "2026-01-01 00:00:00"},
-            {"id": 2, "source_job_id": 5, "source_job_name": "my-job", "consumed": True,
+            {"id": "msg-2", "source_job_name": "my-job", "consumed": True,
              "consumer": None, "created_at": "2026-01-01 00:01:00"},
         ]
         _print_messages(json.dumps(messages))
@@ -288,13 +285,13 @@ class TestPrintMessages:
 
     def test_text_mode_dispatches(self, capsys):
         messages = [
-            {"id": 1, "source_job_name": "my-job", "consumed": False,
+            {"id": "msg-1", "source_job_name": "my-job", "consumed": False,
              "consumer": "agent", "created_at": "2026-01-01 00:00:00",
              "payload": {"message": "hello world"}},
         ]
         _print_messages(json.dumps(messages), text=True)
         out = capsys.readouterr().out
-        assert "--- Message 1 ---" in out
+        assert "--- Message msg-1 ---" in out
         assert "hello world" in out
 
     def test_text_mode_empty(self, capsys):
@@ -307,13 +304,13 @@ class TestPrintMessagesText:
         monkeypatch.setenv("TZ", "UTC")
         time.tzset()
         messages = [
-            {"id": 42, "source_job_name": "my-job", "consumed": False,
+            {"id": "msg-42", "source_job_name": "my-job", "consumed": False,
              "consumer": "worker-1", "created_at": "2026-04-22 11:48:16",
              "payload": {"message": "task completed"}},
         ]
         _print_messages_text(messages)
         out = capsys.readouterr().out
-        assert "--- Message 42 ---" in out
+        assert "--- Message msg-42 ---" in out
         assert "Job: my-job" in out
         assert "Consumed: no" in out
         assert "Consumer: worker-1" in out
@@ -322,23 +319,23 @@ class TestPrintMessagesText:
 
     def test_multiple_messages(self, capsys):
         messages = [
-            {"id": 1, "source_job_name": "job-a", "consumed": True,
+            {"id": "msg-1", "source_job_name": "job-a", "consumed": True,
              "consumer": None, "created_at": "2026-01-01",
              "payload": "plain text payload"},
-            {"id": 2, "source_job_name": "job-b", "consumed": False,
+            {"id": "msg-2", "source_job_name": "job-b", "consumed": False,
              "consumer": "agent", "created_at": "2026-01-02",
              "payload": {"key": "value"}},
         ]
         _print_messages_text(messages)
         out = capsys.readouterr().out
-        assert "--- Message 1 ---" in out
-        assert "--- Message 2 ---" in out
+        assert "--- Message msg-1 ---" in out
+        assert "--- Message msg-2 ---" in out
         assert "plain text payload" in out
         assert "Consumer: -" in out  # None consumer shows as "-"
 
     def test_null_payload(self, capsys):
         messages = [
-            {"id": 5, "source_job_name": "job-c", "consumed": False,
+            {"id": "msg-5", "source_job_name": "job-c", "consumed": False,
              "consumer": None, "created_at": "2026-01-01",
              "payload": None},
         ]
@@ -348,7 +345,7 @@ class TestPrintMessagesText:
 
     def test_list_payload(self, capsys):
         messages = [
-            {"id": 6, "source_job_name": "job-d", "consumed": False,
+            {"id": "msg-6", "source_job_name": "job-d", "consumed": False,
              "consumer": None, "created_at": "2026-01-01",
              "payload": [1, 2, 3]},
         ]
@@ -365,7 +362,7 @@ class TestCommandHandlers:
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_list(self, mock_call, capsys):
-        jobs = [{"id": 1, "name": "j1", "cron_expression": "* * * * *",
+        jobs = [{"name": "j1", "cron_expression": "* * * * *",
                  "status": "enabled", "consumes": []}]
         mock_call.return_value = json.dumps(jobs)
         args = build_parser().parse_args(["list"])
@@ -384,7 +381,7 @@ class TestCommandHandlers:
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_status(self, mock_call, capsys):
         data = {
-            "name": "j1", "id": 1, "status": "enabled",
+            "name": "j1", "status": "enabled",
             "cron_expression": "* * * * *", "command": "echo hi",
             "consumes": [],
             "exclusive_lock": None, "timeout_seconds": None,
@@ -400,7 +397,7 @@ class TestCommandHandlers:
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_register(self, mock_call, capsys):
-        mock_call.return_value = json.dumps({"name": "new-job", "id": 5})
+        mock_call.return_value = json.dumps({"name": "new-job"})
         args = build_parser().parse_args([
             "register", "--name", "new-job", "--cron", "* * * * *", "--command", "echo hi",
         ])
@@ -412,7 +409,7 @@ class TestCommandHandlers:
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_register_with_consumes(self, mock_call, capsys):
-        mock_call.return_value = json.dumps({"name": "consumer-job", "id": 6})
+        mock_call.return_value = json.dumps({"name": "consumer-job"})
         args = build_parser().parse_args([
             "register", "--name", "consumer-job", "--cron", "*/5 * * * *",
             "--command", "process.sh", "--consumes", "job-a,job-b",
@@ -433,7 +430,7 @@ class TestCommandHandlers:
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_unregister(self, mock_call, capsys):
-        mock_call.return_value = json.dumps({"status": "deleted", "name": "old", "id": 3})
+        mock_call.return_value = json.dumps({"status": "deleted", "name": "old"})
         args = build_parser().parse_args(["unregister", "old"])
         cmd_unregister(args)
         assert "Unregistered" in capsys.readouterr().out
@@ -511,7 +508,7 @@ class TestCommandHandlers:
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_update(self, mock_call, capsys):
-        mock_call.return_value = json.dumps({"name": "my-job", "id": 3})
+        mock_call.return_value = json.dumps({"name": "my-job"})
         args = build_parser().parse_args([
             "update", "--name", "my-job", "--cron", "*/10 * * * *",
         ])
@@ -541,7 +538,7 @@ class TestCommandHandlers:
     def test_cmd_trigger(self, mock_call, capsys):
         mock_call.return_value = json.dumps({
             "status": "triggered",
-            "job": {"name": "t1", "id": 1},
+            "job": {"name": "t1"},
         })
         args = build_parser().parse_args(["trigger", "t1"])
         cmd_trigger(args)
@@ -558,26 +555,25 @@ class TestTriggerJobTool:
 
     @pytest.fixture
     def setup(self, tmp_path):
-        db_path = tmp_path / "trigger_test.db"
-        server = create_mcp_server(db_path=db_path)
-        db = Database(db_path=db_path)
+        server = create_mcp_server(data_dir=tmp_path)
+        from overlord.job_store import JobStore
+        js = JobStore(data_dir=tmp_path)
         tool_map = {}
         for t in server._tool_manager.list_tools():
             tool_map[t.name] = t.fn
-        yield tool_map, db
-        db.close()
+        yield tool_map, js
 
     def test_trigger_job_exists(self, setup):
-        tool_map, db = setup
+        tool_map, js = setup
         assert "trigger_job" in tool_map
 
     def test_trigger_nonexistent_job(self, setup):
-        tool_map, db = setup
+        tool_map, js = setup
         result = json.loads(asyncio.run(tool_map["trigger_job"](name="ghost")))
         assert "error" in result
 
     def test_trigger_existing_job(self, setup):
-        tool_map, db = setup
+        tool_map, js = setup
         # Register a quick job
         tool_map["register_job"](
             name="quick",

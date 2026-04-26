@@ -3,23 +3,28 @@
 import asyncio
 import json
 import logging
-import sqlite3
+import os
 from pathlib import Path
 from typing import Optional
 
-from .database import DEFAULT_DB_PATH, Database
+from .execution_log import ExecutionLog
 from .executor import run_job
+from .job_store import JobStore
+from .lock_store import LockStore
 from .maildir import CATCHALL, MaildirStore
 from .models import ExecutionStatus, Job, JobStatus
 from .spool import SpoolWriter
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_DATA_DIR = Path(
+    os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
+) / "overlord"
+
 
 def _job_to_dict(job: Job) -> dict:
     """Convert a Job dataclass to a JSON-serialisable dictionary."""
     return {
-        "id": job.id,
         "name": job.name,
         "cron_expression": job.cron_expression,
         "command": job.command,
@@ -35,15 +40,11 @@ def _job_to_dict(job: Job) -> dict:
     }
 
 
-def _execution_to_dict(rec, db: Optional["Database"] = None) -> dict:
-    """Convert an ExecutionRecord to a JSON-serialisable dictionary.
-
-    When *db* is provided, structured output is retrieved from the already-
-    parsed message in the message hub rather than re-parsing stdout.
-    """
-    result = {
+def _execution_to_dict(rec) -> dict:
+    """Convert an ExecutionRecord to a JSON-serialisable dictionary."""
+    return {
         "id": rec.id,
-        "job_id": rec.job_id,
+        "job_name": rec.job_name,
         "status": rec.status.value,
         "started_at": str(rec.started_at) if rec.started_at else None,
         "finished_at": str(rec.finished_at) if rec.finished_at else None,
@@ -51,42 +52,31 @@ def _execution_to_dict(rec, db: Optional["Database"] = None) -> dict:
         "stdout": rec.stdout,
         "stderr": rec.stderr,
     }
-    if rec.status == ExecutionStatus.SUCCESS and rec.stdout and db is not None:
-        # Retrieve structured output from the message that was already
-        # produced during execution, avoiding a redundant parse of stdout.
-        for msg in db.get_messages_by_job(rec.job_id, limit=5):
-            try:
-                payload = json.loads(msg.payload)
-                if payload.get("execution_id") == rec.id and "message" in payload:
-                    result["structured_output"] = {
-                        "consumer": msg.consumer,
-                        "message": payload["message"],
-                    }
-                    break
-            except (json.JSONDecodeError, KeyError):
-                pass
-    return result
 
 
 def create_mcp_server(
-    db_path: Optional[Path] = None,
-    db: Optional["Database"] = None,
+    data_dir: Optional[Path] = None,
+    job_store: Optional[JobStore] = None,
+    execution_log: Optional[ExecutionLog] = None,
+    lock_store: Optional[LockStore] = None,
     host: str = "127.0.0.1",
     port: int = 8000,
     cwd: Optional[Path] = None,
     spool: Optional[SpoolWriter] = None,
 ):
-    """Create and return a FastMCP server wired to the given database.
+    """Create and return a FastMCP server wired to the given stores.
 
     Parameters
     ----------
-    db_path : Path, optional
-        Path to the SQLite database.  Falls back to DEFAULT_DB_PATH.
-        Ignored when *db* is provided.
-    db : Database, optional
-        An existing Database instance to reuse (e.g. shared with the
-        scheduler).  When provided, the caller is responsible for
-        schema initialisation and lifecycle management.
+    data_dir : Path, optional
+        Root data directory.  Falls back to DEFAULT_DATA_DIR.
+        Ignored when individual stores are provided.
+    job_store : JobStore, optional
+        An existing JobStore instance to reuse.
+    execution_log : ExecutionLog, optional
+        An existing ExecutionLog instance to reuse.
+    lock_store : LockStore, optional
+        An existing LockStore instance to reuse.
     host : str
         Bind address for the streamable-HTTP transport (default ``127.0.0.1``).
     port : int
@@ -100,12 +90,16 @@ def create_mcp_server(
     from mcp.server.fastmcp import FastMCP
 
     mcp = FastMCP("overlord-job-registry", host=host, port=port)
-    if db is None:
-        db = Database(db_path=db_path)
-        db.init_schema()
+    _data_dir = data_dir or DEFAULT_DATA_DIR
+    if job_store is None:
+        job_store = JobStore(data_dir=_data_dir)
+    if execution_log is None:
+        execution_log = ExecutionLog(data_dir=_data_dir)
+    if lock_store is None:
+        lock_store = LockStore(data_dir=_data_dir)
     if spool is None:
-        spool = SpoolWriter(data_dir=db.db_path.parent)
-    maildir_store = MaildirStore(data_dir=db.db_path.parent)
+        spool = SpoolWriter(data_dir=_data_dir)
+    maildir_store = MaildirStore(data_dir=_data_dir)
 
     @mcp.tool()
     def register_job(
@@ -167,15 +161,15 @@ def create_mcp_server(
             queue_name=queue_name,
         )
         try:
-            created = db.create_job(job)
-        except sqlite3.IntegrityError:
+            created = job_store.create_job(job)
+        except FileExistsError:
             return json.dumps({"error": f"Job '{name}' already exists"})
-        logger.info("Registered job %r (id=%s)", created.name, created.id)
+        logger.info("Registered job %r", created.name)
         return json.dumps(_job_to_dict(created))
 
     @mcp.tool()
     def unregister_job(name: str) -> str:
-        """Remove a job by name.  This also deletes its execution history and messages.
+        """Remove a job by name.
 
         Parameters
         ----------
@@ -187,12 +181,12 @@ def create_mcp_server(
         str
             JSON confirmation or error message.
         """
-        job = db.get_job_by_name(name)
+        job = job_store.get_job_by_name(name)
         if job is None:
             return json.dumps({"error": f"Job '{name}' not found"})
-        db.delete_job(job.id)
-        logger.info("Unregistered job %r (id=%s)", name, job.id)
-        return json.dumps({"status": "deleted", "name": name, "id": job.id})
+        job_store.delete_job(name)
+        logger.info("Unregistered job %r", name)
+        return json.dumps({"status": "deleted", "name": name})
 
     @mcp.tool()
     def update_job(
@@ -237,7 +231,7 @@ def create_mcp_server(
         str
             JSON object with the updated job details or an error message.
         """
-        job = db.get_job_by_name(name)
+        job = job_store.get_job_by_name(name)
         if job is None:
             return json.dumps({"error": f"Job '{name}' not found"})
 
@@ -258,8 +252,8 @@ def create_mcp_server(
         if queue_name is not None:
             job.queue_name = queue_name
 
-        db.update_job(job)
-        logger.info("Updated job %r (id=%s)", name, job.id)
+        job_store.update_job(job)
+        logger.info("Updated job %r", name)
         return json.dumps(_job_to_dict(job))
 
     @mcp.tool()
@@ -284,7 +278,7 @@ def create_mcp_server(
                 return json.dumps(
                     {"error": f"Invalid status '{status}'. Use: enabled, disabled, paused"}
                 )
-        jobs = db.list_jobs(status=filter_status)
+        jobs = job_store.list_jobs(status=filter_status)
         return json.dumps([_job_to_dict(j) for j in jobs])
 
     @mcp.tool()
@@ -301,12 +295,12 @@ def create_mcp_server(
         str
             JSON object with job details and last 5 executions.
         """
-        job = db.get_job_by_name(name)
+        job = job_store.get_job_by_name(name)
         if job is None:
             return json.dumps({"error": f"Job '{name}' not found"})
-        executions = db.get_execution_history(job.id, limit=5)
+        executions = execution_log.get_execution_history(job.name, limit=5)
         result = _job_to_dict(job)
-        result["recent_executions"] = [_execution_to_dict(e, db=db) for e in executions]
+        result["recent_executions"] = [_execution_to_dict(e) for e in executions]
         return json.dumps(result)
 
     @mcp.tool()
@@ -384,7 +378,6 @@ def create_mcp_server(
             job_name = subject.split(" ", 1)[0] if subject else "(unknown)"
             result.append({
                 "id": m["key"],
-                "source_job_id": None,
                 "source_job_name": job_name,
                 "payload": payload,
                 "consumer": m.get("consumer"),
@@ -460,7 +453,6 @@ def create_mcp_server(
             job_name = subject.split(" ", 1)[0] if subject else "(unknown)"
             result.append({
                 "id": m["key"],
-                "source_job_id": None,
                 "source_job_name": job_name,
                 "payload": payload,
                 "consumer": m.get("consumer"),
@@ -500,7 +492,6 @@ def create_mcp_server(
         logger.info("Message spooled file=%s consumer=%r", spool_path.name, consumer)
         return json.dumps({
             "id": spool_path.stem,
-            "source_job_id": None,
             "payload": payload,
             "consumer": consumer,
             "consumed": False,
@@ -524,13 +515,13 @@ def create_mcp_server(
         str
             JSON object with the execution id or an error message.
         """
-        job = db.get_job_by_name(name)
+        job = job_store.get_job_by_name(name)
         if job is None:
             return json.dumps({"error": f"Job '{name}' not found"})
 
         async def _run() -> None:
             try:
-                await run_job(job, db, spool, cwd=cwd)
+                await run_job(job, execution_log, lock_store, spool, cwd=cwd)
             except Exception:
                 logger.exception("trigger_job: background execution failed for %r", name)
 
