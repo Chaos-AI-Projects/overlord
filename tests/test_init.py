@@ -105,6 +105,13 @@ class TestCmdInit:
         cmd_init(args)
         cmd_init(args)
 
+        out = capsys.readouterr().out
+        # Second init with unchanged templates should not install/update/skip any files
+        assert "Updated" not in out
+        assert "Skipped" not in out
+        # Job registration should report already registered
+        assert "already registered" in out
+
         # Still only one job file
         jobs_dir = default_data_dir / "jobs"
         job_files = [f for f in jobs_dir.iterdir() if f.suffix == ".json"]

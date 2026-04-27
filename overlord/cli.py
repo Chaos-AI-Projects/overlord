@@ -19,6 +19,7 @@ Usage::
 import argparse
 import asyncio
 import json
+import logging
 import shutil
 import subprocess
 import sys
@@ -273,7 +274,7 @@ def _git_commit(cwd: Path, message: str, paths: list[str]) -> bool:
     )
     if r.returncode == 0:
         return False  # nothing staged
-    subprocess.run(
+    r = subprocess.run(
         [
             "git",
             "-c", "user.name=overlord",
@@ -284,6 +285,9 @@ def _git_commit(cwd: Path, message: str, paths: list[str]) -> bool:
         cwd=cwd,
         capture_output=True,
     )
+    if r.returncode != 0:
+        logging.getLogger(__name__).warning("git commit failed: %s", r.stderr.decode().strip())
+        return False
     return True
 
 
