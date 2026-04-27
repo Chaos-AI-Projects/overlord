@@ -16,6 +16,7 @@ The following skills are installed in `.claude/commands/` and available as slash
 - `/register-job` — Register a new scheduled job with cron expression, command, and optional parameters
 - `/unregister-job` — Remove an existing job from the scheduler
 - `/update-job` — Modify parameters of an existing job (cron, command, timeout, etc.)
+- `/rotate-log` — Rotate the daemon log file (close and reopen the file handler)
 
 Use these skills for guided, interactive job management instead of running CLI commands manually.
 

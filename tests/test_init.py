@@ -62,6 +62,7 @@ class TestCmdInit:
         assert (commands_dir / "register-job.md").exists()
         assert (commands_dir / "unregister-job.md").exists()
         assert (commands_dir / "update-job.md").exists()
+        assert (commands_dir / "rotate-log.md").exists()
 
     def test_skills_content(self, tmp_path, default_data_dir):
         vault = tmp_path / "vault"
