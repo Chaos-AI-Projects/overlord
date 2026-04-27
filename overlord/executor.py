@@ -131,6 +131,11 @@ async def _run_subprocess(
         # subject, date.  Consumer scripts extract what they need (e.g.
         # .[].payload in jq).
         stdin_data = json.dumps(input_messages).encode()
+        logger.info(
+            "job=%s execution=%d stdin (%d messages, %d bytes):\n%s",
+            job.name, record.id, len(input_messages), len(stdin_data),
+            "\n".join(json.dumps(m) for m in input_messages),
+        )
 
     timed_out = False
     try:
