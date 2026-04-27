@@ -129,7 +129,10 @@ class Scheduler:
 
     async def _run_mcp_server(self) -> None:
         """Run the MCP streamable-HTTP server."""
-        await self._mcp_server.run_streamable_http_async()
+        try:
+            await self._mcp_server.run_streamable_http_async()
+        except asyncio.CancelledError:
+            pass
 
     def _install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
@@ -305,7 +308,10 @@ class Scheduler:
             logger.info("Spool processor stopped")
 
         # Stop the MCP server.
+        # Grace delay lets the in-flight shutdown response complete before
+        # we cancel the task, avoiding noisy CancelledError tracebacks (#167).
         if self._mcp_task is not None and not self._mcp_task.done():
+            await asyncio.sleep(0.5)
             self._mcp_task.cancel()
             try:
                 await asyncio.wait_for(self._mcp_task, timeout=5)
