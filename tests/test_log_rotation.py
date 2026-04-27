@@ -108,7 +108,7 @@ class TestRotateLogMCPTool:
         server = create_mcp_server(data_dir=tmp_path, rotate_log_callback=rotate_log_handler)
         tool_map = {t.name: t.fn for t in server._tool_manager.list_tools()}
         result = json.loads(tool_map["rotate_log"]())
-        assert result["status"] == "log file rotated"
+        assert result["status"].startswith("log file rotated: ")
 
         for h in root.handlers:
             h.close()
@@ -124,7 +124,7 @@ class TestRotateLogCLI:
     def test_daemon_log_file_default(self):
         parser = build_parser()
         args = parser.parse_args(["daemon"])
-        assert args.log_file is None
+        assert args.log_file == "auto"
 
     @mock.patch("overlord.cli._call_tool")
     def test_cmd_rotate_log_success(self, mock_call, capsys):

@@ -60,13 +60,14 @@ def rotate_log_handler() -> str:
     """
     root = logging.getLogger("overlord")
     rotated = False
+    log_path = None
     for handler in root.handlers:
         if isinstance(handler, logging.FileHandler):
-            old_path = handler.baseFilename
+            log_path = handler.baseFilename
             handler.close()
             handler.stream = handler._open()
             rotated = True
-            root.info("Log file rotated: %s", old_path)
+            root.info("Log file rotated: %s", log_path)
     if rotated:
-        return "log file rotated"
+        return f"log file rotated: {log_path}"
     return "no file handler configured, nothing to rotate"
