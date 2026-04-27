@@ -6,7 +6,7 @@ its MCP streamable-HTTP endpoint, avoiding direct database access.
 Usage::
 
     overlord init [PATH]
-    overlord daemon [--data-dir PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT] [--log-file PATH]
+    overlord daemon [--data-dir PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT] [--log-file PATH|none]
     overlord list [--status STATUS] [--mcp-url URL]
     overlord status JOB_NAME [--mcp-url URL]
     overlord register --name NAME --cron EXPR --command CMD [options] [--mcp-url URL]
@@ -288,13 +288,23 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 def cmd_daemon(args: argparse.Namespace) -> None:
     """Start the scheduler daemon."""
+    from .job_store import DEFAULT_DATA_DIR
     from .logging_config import setup_logging
     from .scheduler import Scheduler
 
-    setup_logging(log_file=args.log_file)
+    data_dir = Path(args.data_dir) if args.data_dir else DEFAULT_DATA_DIR
+
+    # Resolve log file: "auto" → <data-dir>/overlord.log, "none" → disabled
+    log_file = args.log_file
+    if log_file == "auto":
+        log_file = str(data_dir / "overlord.log")
+    elif log_file and log_file.lower() == "none":
+        log_file = None
+
+    setup_logging(log_file=log_file)
 
     scheduler = Scheduler(
-        data_dir=Path(args.data_dir) if args.data_dir else None,
+        data_dir=data_dir,
         tick_seconds=args.tick,
         mcp_host=args.mcp_host,
         mcp_port=args.mcp_port,
@@ -535,7 +545,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_daemon.add_argument("--tick", type=int, default=60, help="Tick interval in seconds (default: 60)")
     p_daemon.add_argument("--mcp-host", default="127.0.0.1", help="MCP bind address (default: 127.0.0.1)")
     p_daemon.add_argument("--mcp-port", type=int, default=8000, help="MCP port (default: 8000)")
-    p_daemon.add_argument("--log-file", metavar="PATH", help="Write logs to FILE in addition to stderr")
+    p_daemon.add_argument("--log-file", metavar="PATH", default="auto",
+                          help="Write logs to FILE in addition to stderr (default: <data-dir>/overlord.log, use --log-file=none to disable)")
     p_daemon.set_defaults(func=cmd_daemon)
 
     # list
