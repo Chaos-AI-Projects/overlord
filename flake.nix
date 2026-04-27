@@ -39,6 +39,10 @@
       overlord
       gwsCli
       pkgsUnstable.claude-code
+      (pkgs.python312.withPackages (ps: with ps; [
+        pip
+        pandas
+      ]))
       pkgs.bash
       pkgs.coreutils
       pkgs.findutils
