@@ -126,16 +126,11 @@ async def _run_subprocess(
 
     stdin_data = None
     if input_messages:
-        # Extract payload.json content from each Maildir message and
-        # concatenate into a JSON array for the consumer job's stdin.
-        payloads = []
-        for m in input_messages:
-            raw = m.get("payload", "")
-            try:
-                payloads.append(json.loads(raw))
-            except (json.JSONDecodeError, TypeError):
-                payloads.append(raw)
-        stdin_data = json.dumps(payloads).encode()
+        # Pass the full Maildir message dicts to the consumer job's stdin
+        # as a JSON array.  Each dict has keys: key, consumer, payload,
+        # subject, date.  Consumer scripts extract what they need (e.g.
+        # .[].payload in jq).
+        stdin_data = json.dumps(input_messages).encode()
 
     timed_out = False
     try:

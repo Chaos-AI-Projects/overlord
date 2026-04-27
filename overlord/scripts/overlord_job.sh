@@ -7,7 +7,7 @@
 # structured JSON output on stdout.
 #
 # Expected stdin format (from executor):
-#   [{"message_id": 1, "payload": "...", ...}, ...]
+#   [{"key": "...", "consumer": "...", "payload": "...", "subject": "...", "date": "..."}, ...]
 #
 # Required stdout format (for executor):
 #   {"consumer": null, "message": "..."}
