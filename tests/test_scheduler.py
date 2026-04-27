@@ -187,6 +187,59 @@ class TestSchedulerConsumes:
         await asyncio.gather(*scheduler._running_tasks.values())
 
 
+class TestSchedulerSpoolProcessor:
+    """Test that the scheduler starts and stops the spool processor."""
+
+    @pytest.mark.asyncio
+    async def test_spool_processor_delivers_during_run(self, tmp_path):
+        """Messages written to spool during scheduler run get delivered to Maildir."""
+        from overlord.maildir import MaildirStore
+
+        s = Scheduler(data_dir=tmp_path, tick_seconds=1)
+        # Register a job that produces output (which goes through the spool).
+        output = json.dumps({"consumer": "inbox", "message": "hello from job"})
+        s._job_store.create_job(Job(
+            name="producer",
+            cron_expression="* * * * *",
+            command=f"echo '{output}'",
+        ))
+
+        async def run_and_stop():
+            # Let the scheduler tick once and give the spool processor time to deliver.
+            await asyncio.sleep(1.5)
+            await s.stop()
+
+        asyncio.create_task(run_and_stop())
+        await s.run()
+
+        # The spool should be drained (no .eml files left).
+        spool_dir = tmp_path / "spool"
+        spool_files = list(spool_dir.glob("*.eml"))
+        assert len(spool_files) == 0
+
+        # The message should have been delivered to the "inbox" Maildir.
+        store = MaildirStore(data_dir=tmp_path)
+        msgs = store.fetch_messages("inbox")
+        assert len(msgs) >= 1
+        assert any("hello from job" in m["payload"] for m in msgs)
+
+    @pytest.mark.asyncio
+    async def test_spool_processor_stops_on_shutdown(self, tmp_path):
+        """The spool processor task should be stopped during scheduler shutdown."""
+        s = Scheduler(data_dir=tmp_path, tick_seconds=1)
+
+        async def stop_soon():
+            await asyncio.sleep(0.2)
+            await s.stop()
+
+        asyncio.create_task(stop_soon())
+        await s.run()
+
+        # After run() returns, the spool task should be done.
+        assert s._spool_task is not None
+        assert s._spool_task.done()
+
+
 class TestSchedulerWithMcp:
     @pytest.mark.asyncio
     async def test_mcp_server_starts_and_stops(self, tmp_path):

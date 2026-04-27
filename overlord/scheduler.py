@@ -28,7 +28,7 @@ from .lock_store import LockStore
 from .maildir import CATCHALL, MaildirStore
 from .mcp_server import create_mcp_server
 from .models import Job, JobStatus
-from .spool import SpoolWriter
+from .spool import SpoolProcessor, SpoolWriter
 
 logger = logging.getLogger("overlord.scheduler")
 
@@ -58,6 +58,8 @@ class Scheduler:
         self._execution_log = ExecutionLog(data_dir=self._data_dir)
         self._lock_store = LockStore(data_dir=self._data_dir)
         self._spool = SpoolWriter(data_dir=self._data_dir)
+        self._spool_processor = SpoolProcessor(data_dir=self._data_dir)
+        self._spool_task: Optional[asyncio.Task] = None
         self._maildir = MaildirStore(data_dir=self._data_dir)
         self._tick_seconds = tick_seconds
         self._stop_event = asyncio.Event()
@@ -95,6 +97,10 @@ class Scheduler:
                 self._mcp_server.settings.host,
                 self._mcp_server.settings.port,
             )
+
+        self._spool_task = asyncio.create_task(
+            self._spool_processor.run(), name="spool-processor"
+        )
 
         logger.info("Scheduler started (tick=%ds)", self._tick_seconds)
 
@@ -286,6 +292,15 @@ class Scheduler:
 
     async def _shutdown(self) -> None:
         """Wait for running jobs to finish, with a grace period."""
+        # Stop the spool processor (drains remaining messages before exiting).
+        if self._spool_task is not None and not self._spool_task.done():
+            self._spool_processor.stop()
+            try:
+                await asyncio.wait_for(self._spool_task, timeout=10)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            logger.info("Spool processor stopped")
+
         # Stop the MCP server.
         if self._mcp_task is not None and not self._mcp_task.done():
             self._mcp_task.cancel()
