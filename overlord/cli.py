@@ -28,6 +28,15 @@ from typing import Optional
 DEFAULT_MCP_URL = "http://127.0.0.1:8000/mcp/"
 
 
+def resolve_log_file(log_file: str, data_dir: Path) -> Optional[str]:
+    """Resolve log file setting: "auto" → <data-dir>/overlord.log, "none" → None."""
+    if log_file == "auto":
+        return str(data_dir / "overlord.log")
+    if log_file and log_file.lower() == "none":
+        return None
+    return log_file
+
+
 def _utc_to_local(ts: str) -> str:
     """Convert a UTC timestamp string to local time for display."""
     if not ts:
@@ -293,13 +302,7 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     from .scheduler import Scheduler
 
     data_dir = Path(args.data_dir) if args.data_dir else DEFAULT_DATA_DIR
-
-    # Resolve log file: "auto" → <data-dir>/overlord.log, "none" → disabled
-    log_file = args.log_file
-    if log_file == "auto":
-        log_file = str(data_dir / "overlord.log")
-    elif log_file and log_file.lower() == "none":
-        log_file = None
+    log_file = resolve_log_file(args.log_file, data_dir)
 
     setup_logging(log_file=log_file)
 
@@ -422,10 +425,8 @@ def cmd_log_path(args: argparse.Namespace) -> None:
     from .job_store import DEFAULT_DATA_DIR
 
     data_dir = Path(args.data_dir) if args.data_dir else DEFAULT_DATA_DIR
-    log_file = args.log_file
-    if log_file == "auto":
-        log_file = str(data_dir / "overlord.log")
-    elif log_file and log_file.lower() == "none":
+    log_file = resolve_log_file(args.log_file, data_dir)
+    if log_file is None:
         print("Log file disabled (--log-file=none)", file=sys.stderr)
         sys.exit(1)
     print(log_file)
