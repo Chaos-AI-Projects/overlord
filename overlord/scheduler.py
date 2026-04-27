@@ -74,6 +74,7 @@ class Scheduler:
             self._mcp_server = create_mcp_server(
                 data_dir=self._data_dir, host=mcp_host, port=mcp_port,
                 cwd=self._cwd, spool=self._spool,
+                shutdown_callback=self.stop,
             )
 
     async def run(self) -> None:

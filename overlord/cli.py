@@ -397,6 +397,16 @@ def cmd_trigger(args: argparse.Namespace) -> None:
     print(f"Triggered job '{data['job']['name']}' — use 'overlord status {args.name}' to check progress")
 
 
+def cmd_stop(args: argparse.Namespace) -> None:
+    """Ask the daemon to shut down gracefully."""
+    raw = asyncio.run(_call_tool(args.mcp_url, "shutdown_daemon", {}))
+    data = json.loads(raw)
+    if "error" in data:
+        print(f"Error: {data['error']}", file=sys.stderr)
+        sys.exit(1)
+    print("Shutdown initiated")
+
+
 def cmd_send(args: argparse.Namespace) -> None:
     """Send a message by writing directly to the file-based spool."""
     from . import maildir as _maildir
@@ -593,6 +603,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list[str]] = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
+    # Hidden command: 'stop' is not shown in --help but is still usable.
+    if argv and argv[0] == "stop":
+        ns = argparse.Namespace(mcp_url=DEFAULT_MCP_URL)
+        rest = argv[1:]
+        for i, arg in enumerate(rest):
+            if arg == "--mcp-url" and i + 1 < len(rest):
+                ns.mcp_url = rest[i + 1]
+        cmd_stop(ns)
+        return
     parser = build_parser()
     args = parser.parse_args(argv)
     args.func(args)

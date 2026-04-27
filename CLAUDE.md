@@ -22,6 +22,7 @@ overlord unregister JOB_NAME [--mcp-url URL]
 overlord trigger JOB_NAME [--mcp-url URL]
 overlord messages [--job NAME] [--consumer NAME] [--unconsumed] [--limit N] [--text] [--mcp-url URL]
 overlord send [--consumer NAME] [--payload TEXT] [--mcp-url URL]
+overlord stop [--mcp-url URL]  # hidden from --help; asks daemon to exit gracefully
 
 # Run tests
 pytest overlord/tests -v
@@ -96,7 +97,7 @@ Concurrency is handled via `flock(2)` for job files and the ID counter, `O_CREAT
 ### MCP Interface
 
 - StreamableHTTP MCP server runs alongside the scheduler
-- Exposes tools: register/unregister jobs, list jobs, trigger execution, query/send messages
+- Exposes tools: register/unregister jobs, list jobs, trigger execution, query/send messages, shutdown daemon
 - CLI commands communicate with the daemon through MCP (avoids direct file access)
 
 ## Environment Variables

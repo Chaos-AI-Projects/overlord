@@ -63,6 +63,7 @@ def create_mcp_server(
     port: int = 8000,
     cwd: Optional[Path] = None,
     spool: Optional[SpoolWriter] = None,
+    shutdown_callback=None,
 ):
     """Create and return a FastMCP server wired to the given stores.
 
@@ -530,5 +531,20 @@ def create_mcp_server(
         await asyncio.sleep(0.05)
         logger.info("Manually triggered job %r", name)
         return json.dumps({"status": "triggered", "job": _job_to_dict(job)})
+
+    @mcp.tool()
+    async def shutdown_daemon() -> str:
+        """Request the scheduler daemon to shut down gracefully.
+
+        Returns
+        -------
+        str
+            JSON confirmation or error message.
+        """
+        if shutdown_callback is None:
+            return json.dumps({"error": "shutdown not available (no callback registered)"})
+        logger.info("shutdown_daemon tool invoked, requesting graceful shutdown")
+        asyncio.get_running_loop().call_soon(asyncio.ensure_future, shutdown_callback())
+        return json.dumps({"status": "shutdown initiated"})
 
     return mcp
