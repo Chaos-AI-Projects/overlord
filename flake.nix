@@ -51,6 +51,8 @@
       pkgs.procps        # ps, top, etc.
       pkgs.gh            # GitHub CLI
       pkgs.nodejs        # Node.js LTS
+      pkgs.which
+      pkgs.less
     ];
 
     binPath = lib.makeBinPath runtimePackages;
