@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import json
 import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -227,6 +228,65 @@ def _print_job_status(raw: str) -> None:
         print("\nNo recent executions.")
 
 
+# -- Git helpers for vault init --
+
+
+def _git_available() -> bool:
+    """Return True if git is available on PATH."""
+    try:
+        subprocess.run(
+            ["git", "--version"],
+            capture_output=True,
+            check=True,
+        )
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+
+def _git_is_inside_worktree(cwd: Path) -> bool:
+    """Return True if *cwd* is inside an existing git worktree."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+        )
+        return r.returncode == 0 and r.stdout.strip() == "true"
+    except FileNotFoundError:
+        return False
+
+
+def _git_commit(cwd: Path, message: str, paths: list[str]) -> bool:
+    """Stage *paths* and commit with safe defaults. Return True if a commit was created."""
+    subprocess.run(
+        ["git", "add"] + paths,
+        cwd=cwd,
+        capture_output=True,
+    )
+    # Check if there is anything staged to commit
+    r = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=cwd,
+        capture_output=True,
+    )
+    if r.returncode == 0:
+        return False  # nothing staged
+    subprocess.run(
+        [
+            "git",
+            "-c", "user.name=overlord",
+            "-c", "user.email=overlord@local",
+            "commit", "--no-verify",
+            "-m", message,
+        ],
+        cwd=cwd,
+        capture_output=True,
+    )
+    return True
+
+
 # -- Subcommand handlers --
 
 
@@ -239,35 +299,82 @@ def cmd_init(args: argparse.Namespace) -> None:
     vault = Path(args.path).resolve()
     vault.mkdir(parents=True, exist_ok=True)
 
-    # Write CLAUDE.md
-    claude_md = vault / "CLAUDE.md"
-    if claude_md.exists():
-        print(f"CLAUDE.md already exists at {claude_md}, skipping")
-    else:
-        claude_md.write_text(VAULT_CLAUDE_MD)
-        print(f"Created {claude_md}")
-
-    # Install skill command files into .claude/commands/
     _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
     commands_src = _TEMPLATES_DIR / "skills"
-    commands_dest = vault / ".claude" / "commands"
-    commands_dest.mkdir(parents=True, exist_ok=True)
-    for src_file in sorted(commands_src.glob("*.md")):
-        dest_file = commands_dest / src_file.name
-        if dest_file.exists():
-            print(f"{dest_file.name} already exists in .claude/commands/, skipping")
-        else:
-            shutil.copy2(src_file, dest_file)
-            print(f"Installed skill: /{ src_file.stem}")
 
-    # Copy wrapper script into the vault
-    dest_script = vault / "overlord_job.sh"
-    if dest_script.exists():
-        print(f"overlord_job.sh already exists at {dest_script}, skipping")
-    else:
-        shutil.copy2(_OVERLORD_JOB_SCRIPT, dest_script)
-        dest_script.chmod(0o755)
-        print(f"Copied wrapper script to {dest_script}")
+    use_git = _git_available()
+    if not use_git:
+        print("git not found, falling back to simple install mode")
+
+    # -- Ensure vault is a git repo (if git is available) --
+    if use_git:
+        if not _git_is_inside_worktree(vault):
+            subprocess.run(["git", "init"], cwd=vault, capture_output=True)
+            print(f"Initialized git repository in {vault}")
+
+    # -- Build the set of template files to install --
+    # Each entry: (origin_relative_path, content_bytes, executable)
+    templates: list[tuple[str, bytes, bool]] = []
+
+    # CLAUDE.md
+    templates.append(("CLAUDE.md", VAULT_CLAUDE_MD.encode(), False))
+
+    # Skill files
+    for src_file in sorted(commands_src.glob("*.md")):
+        rel = str(Path(".claude") / "commands" / src_file.name)
+        templates.append((rel, src_file.read_bytes(), False))
+
+    # overlord_job.sh
+    templates.append(("overlord_job.sh", _OVERLORD_JOB_SCRIPT.read_bytes(), True))
+
+    # -- Write templates to origin/ and auto-merge working copies --
+    origin_dir = vault / "origin"
+
+    for rel_path, content, executable in templates:
+        origin_file = origin_dir / rel_path
+        working_file = vault / rel_path
+        name_label = rel_path
+
+        # Read the old origin/ content (before overwriting) for comparison
+        old_origin_content: bytes | None = None
+        if origin_file.exists():
+            old_origin_content = origin_file.read_bytes()
+
+        # Always write the latest template to origin/
+        origin_file.parent.mkdir(parents=True, exist_ok=True)
+        origin_file.write_bytes(content)
+        if executable:
+            origin_file.chmod(0o755)
+
+        # Decide whether to copy/update the working copy
+        if not working_file.exists():
+            working_file.parent.mkdir(parents=True, exist_ok=True)
+            working_file.write_bytes(content)
+            if executable:
+                working_file.chmod(0o755)
+            print(f"Installed {name_label}")
+        elif old_origin_content is None:
+            # First init with origin/ — existing working copy predates the
+            # origin tracking.  Treat as potentially modified, skip.
+            print(f"Skipped (pre-existing): {name_label}")
+        elif working_file.read_bytes() == old_origin_content:
+            # Working copy matches previous origin/ — safe to auto-merge
+            if content != old_origin_content:
+                working_file.write_bytes(content)
+                if executable:
+                    working_file.chmod(0o755)
+                print(f"Updated {name_label}")
+            # else: unchanged, nothing to do
+        else:
+            # Working copy was modified by user/agent — skip
+            print(f"Skipped (locally modified): {name_label} — new version in origin/")
+
+    # -- Git commits (if available) --
+    if use_git:
+        _git_commit(vault, "overlord init: update origin/ templates", ["origin/"])
+        # Collect working-copy paths to stage
+        working_paths = [rel for rel, _, _ in templates]
+        _git_commit(vault, "overlord init: update working copies", working_paths)
 
     # Initialize the job store at the shared default location so that
     # `overlord init && overlord daemon` works without any --data-dir flags.
@@ -277,6 +384,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"Initialized job store at {data_dir}")
 
     # Register the overlord job (direct store write, bypassing MCP)
+    dest_script = vault / "overlord_job.sh"
     existing = job_store.get_job_by_name("overlord")
     if existing:
         print(f"Job 'overlord' already registered, skipping")

@@ -146,6 +146,15 @@ overlord send [--consumer NAME] [--payload TEXT] [--mcp-url URL]
 overlord init [PATH]
 ```
 
+`overlord init` uses a **git-based template management** strategy to safely handle skill upgrades without overwriting user modifications:
+
+- Templates (skills, `CLAUDE.md`, `overlord_job.sh`) are always written to an `origin/` subdirectory inside the vault, serving as an upstream reference copy.
+- Working copies in their normal locations (`.claude/commands/`, `./CLAUDE.md`, etc.) are only updated if they haven't been locally modified — detected by comparing the working copy against the previous `origin/` version.
+- Locally modified files are skipped with a warning; the new version is available in `origin/` for manual comparison.
+- If git is available, `overlord init` will initialize the vault as a git repo (or use the existing repo if the vault is already inside one). Template updates and working copy merges are committed automatically.
+- **Note:** When the vault is inside an existing git repository, init commits will appear in that repository's history.
+- If git is not available, `overlord init` falls back to simple copy-and-skip behavior (files are copied only if they don't already exist).
+
 ## Job Configuration
 
 | Field | Type | Default | Description |
