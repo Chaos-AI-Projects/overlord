@@ -1,0 +1,273 @@
+# Overlord
+
+Repeatable tasks manager for AI agents. Provides cron-based job scheduling, message passing between jobs, exclusive locking, and an MCP interface for agent-driven management.
+
+## Architecture Overview
+
+```mermaid
+graph TB
+    subgraph Daemon["Scheduler Daemon"]
+        SCHED[Scheduler Loop]
+        EXEC[Executor]
+        SPOOL[Spool Processor]
+        MCP[MCP Server]
+    end
+
+    subgraph Storage["File-Based Storage (~/.local/share/overlord/)"]
+        JOBS[("jobs/*.json<br/>Job Definitions")]
+        LOG[("execution.log<br/>JSON-lines History")]
+        LOCKS[("locks/*<br/>Exclusive Locks")]
+        MBOX[("mailboxes/&lt;consumer&gt;/<br/>Maildir Messages")]
+        SPOOLDIR[("spool/<br/>Delivery Queue")]
+    end
+
+    CLI[CLI Client] -->|MCP over HTTP| MCP
+    AGENT[AI Agent] -->|MCP over HTTP| MCP
+    MCP --> JOBS
+    MCP --> MBOX
+    MCP --> SPOOLDIR
+
+    SCHED -->|evaluate cron| JOBS
+    SCHED -->|dispatch| EXEC
+    EXEC -->|subprocess| PROC[Job Process]
+    EXEC -->|acquire/release| LOCKS
+    EXEC -->|write| LOG
+    PROC -->|stdout JSON| EXEC
+    EXEC -->|deliver output| SPOOLDIR
+    SPOOL -->|SIGUSR1 wake| SPOOL
+    SPOOL -->|move to Maildir| MBOX
+```
+
+## Job Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Registered: overlord register
+    Registered --> Enabled
+    Enabled --> Due: cron matches
+    Due --> Running: executor starts subprocess
+    Running --> Success: exit 0 + valid JSON
+    Running --> Failed: non-zero exit / invalid output
+    Running --> Timeout: exceeded timeout_seconds
+    Failed --> Retrying: retries remaining
+    Retrying --> Running: after retry_delay
+    Success --> MessageDelivery: output has consumer
+    MessageDelivery --> Spool: queued for delivery
+    Spool --> Maildir: spool processor delivers
+    Success --> [*]
+    Failed --> [*]
+    Timeout --> [*]
+```
+
+## Message Flow
+
+```mermaid
+sequenceDiagram
+    participant Producer as Producer Job
+    participant Executor
+    participant Spool
+    participant Maildir
+    participant Consumer as Consumer Job
+
+    Producer->>Executor: exit 0 + JSON stdout
+    Executor->>Spool: deliver {consumer, message}
+    Executor-->>Executor: send SIGUSR1 to wake spool
+    Spool->>Maildir: move to mailboxes/<consumer>/new/
+    Note over Maildir: RFC 822 envelope + payload.json
+    Executor->>Maildir: check unconsumed messages
+    Maildir->>Consumer: messages passed via stdin
+    Consumer->>Maildir: auto-marked consumed on success
+```
+
+## Installation
+
+```bash
+# Install (editable, from mono-repo root)
+pip install -e overlord
+
+# Or build with Nix
+cd overlord && nix build .#overlord
+```
+
+Requires Python 3.10+ and [mcp](https://pypi.org/project/mcp/) >= 1.0.0.
+
+## CLI Usage
+
+Start the daemon, then manage jobs through CLI commands that talk to the daemon over MCP.
+
+### Daemon
+
+```bash
+overlord daemon [--data-dir PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT]
+```
+
+Starts the scheduler loop, spool processor, and MCP server. Default MCP endpoint: `http://127.0.0.1:8000/mcp/`.
+
+### Job Management
+
+```bash
+# List all jobs (optionally filter by status)
+overlord list [--status enabled|disabled|paused] [--mcp-url URL]
+
+# Show job details and recent executions
+overlord status JOB_NAME [--mcp-url URL]
+
+# Register a new job
+overlord register --name NAME --cron EXPR --command CMD \
+  [--lock LOCK_NAME] [--timeout SECONDS] \
+  [--max-retries N] [--retry-delay SECONDS] \
+  [--consumes NAME ...] [--queue QUEUE_NAME] \
+  [--mcp-url URL]
+
+# Update an existing job
+overlord update --name NAME [--cron EXPR] [--command CMD] [options] [--mcp-url URL]
+
+# Remove a job
+overlord unregister JOB_NAME [--mcp-url URL]
+
+# Manually trigger a job
+overlord trigger JOB_NAME [--mcp-url URL]
+```
+
+### Messages
+
+```bash
+# Query messages
+overlord messages [--job NAME] [--consumer NAME] [--unconsumed] [--limit N] [--text] [--mcp-url URL]
+
+# Send a message via spool
+overlord send [--consumer NAME] [--payload TEXT] [--mcp-url URL]
+```
+
+### Vault Scaffolding
+
+```bash
+# Scaffold a new vault directory with stores and an overlord job
+overlord init [PATH]
+```
+
+## Job Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | *(required)* | Unique job identifier |
+| `cron_expression` | string | *(required)* | Cron schedule (minute, hour, day, month, weekday) |
+| `command` | string | *(required)* | Shell command to execute |
+| `status` | enum | `enabled` | `enabled`, `disabled`, or `paused` |
+| `exclusive_lock` | string | `null` | Named lock — prevents concurrent runs |
+| `timeout_seconds` | int | `null` | Kill the subprocess after this many seconds |
+| `max_retries` | int | `0` | Number of retry attempts on failure |
+| `retry_delay_seconds` | int | `0` | Seconds to wait between retries |
+| `consumes` | list | `[]` | Consumer mailbox names (job runs only when unconsumed messages exist) |
+| `queue_name` | string | `"default"` | Execution queue — jobs on the same queue run serially |
+
+## Structured Job Output
+
+Successful jobs (exit 0) must emit JSON on stdout:
+
+```json
+{"consumer": "job-name", "message": "payload string or object"}
+```
+
+- `consumer` — target mailbox name (or `null` for unaddressed messages)
+- `message` — string or JSON object delivered as the message payload
+
+If stdout is empty or not valid JSON, the execution is marked as failed.
+
+## Storage Layout
+
+All state lives under `$XDG_DATA_HOME/overlord/` (default: `~/.local/share/overlord/`):
+
+```
+overlord/
+├── jobs/               # One JSON file per job definition
+│   ├── fetch-data.json
+│   └── process-data.json
+├── execution.log       # Append-only JSON-lines execution history
+├── execution_id        # Monotonic ID counter (plain text integer)
+├── locks/              # Empty files created with O_CREAT|O_EXCL
+├── mailboxes/          # Maildir-backed message storage
+│   └── <consumer>/
+│       ├── new/        # Newly delivered messages
+│       ├── cur/        # Consumed messages
+│       └── tmp/        # In-flight deliveries
+└── spool/              # File-based delivery queue
+```
+
+Concurrency safety:
+- Job files and ID counter: `flock(2)` advisory locks
+- Named locks: atomic `O_CREAT|O_EXCL` file creation
+- Execution log: POSIX `O_APPEND` atomic writes
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `XDG_DATA_HOME` | `~/.local/share` | Data directory (state stored under `$XDG_DATA_HOME/overlord/`) |
+| `TZ` | `UTC` | Timezone for cron evaluation and timestamp display |
+
+## Container
+
+### Prerequisites
+
+- [Nix](https://nixos.org/download/) with flakes enabled
+
+### Build
+
+```bash
+cd overlord
+nix build .#container
+```
+
+Produces a `result` symlink pointing to a layered OCI image tarball.
+
+### Load
+
+```bash
+# Podman
+podman load < result
+
+# Docker
+docker load < result
+```
+
+The image is tagged `overlord:latest`.
+
+### Run
+
+```bash
+mkdir -p ~/overlord-data
+
+podman run -d \
+  --name overlord \
+  --userns=keep-id \
+  -p 8000:8000 \
+  -v ~/overlord-data:/home/overlord:Z \
+  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  overlord:latest
+```
+
+Replace `podman` with `docker` if using Docker. The container:
+
+- Exposes the MCP server on port **8000**
+- Persists all state in the mounted volume at `/home/overlord`
+- Auto-installs `claude-code` on first start into the volume
+- UID mapping via `--userns=keep-id` (podman)
+- Extra arguments are passed to `overlord daemon` (e.g., `--tick 30`)
+
+### Build Just the Python Package
+
+```bash
+cd overlord
+nix build .#overlord   # or: nix build (default package)
+```
+
+## Testing
+
+```bash
+pytest overlord/tests -v
+```
+
+## License
+
+See [LICENSE](LICENSE).
