@@ -1,12 +1,13 @@
 """Tests for log rotation: logging_config, MCP tool, and CLI command."""
 
+import argparse
 import json
 import logging
 from unittest import mock
 
 import pytest
 
-from overlord.cli import build_parser, cmd_rotate_log, main
+from overlord.cli import build_parser, cmd_log_path, cmd_rotate_log, main
 from overlord.logging_config import JSONFormatter, rotate_log_handler, setup_logging
 
 
@@ -156,3 +157,48 @@ class TestRotateLogCLI:
         main(["rotate-log", "--mcp-url", "http://host:9000/mcp/"])
         ns = mock_cmd.call_args[0][0]
         assert ns.mcp_url == "http://host:9000/mcp/"
+
+
+class TestLogPathCLI:
+    def test_default_path(self, capsys, monkeypatch):
+        """log-path with default args prints <data-dir>/overlord.log."""
+        from overlord.job_store import DEFAULT_DATA_DIR
+
+        cmd_log_path(argparse.Namespace(data_dir=None, log_file="auto"))
+        out = capsys.readouterr().out.strip()
+        assert out == str(DEFAULT_DATA_DIR / "overlord.log")
+
+    def test_custom_data_dir(self, tmp_path, capsys):
+        """log-path respects --data-dir."""
+        cmd_log_path(argparse.Namespace(data_dir=str(tmp_path), log_file="auto"))
+        out = capsys.readouterr().out.strip()
+        assert out == str(tmp_path / "overlord.log")
+
+    def test_custom_log_file(self, capsys):
+        """log-path respects explicit --log-file."""
+        cmd_log_path(argparse.Namespace(data_dir=None, log_file="/var/log/overlord.log"))
+        out = capsys.readouterr().out.strip()
+        assert out == "/var/log/overlord.log"
+
+    def test_log_file_none(self, capsys):
+        """log-path exits with error when --log-file=none."""
+        with pytest.raises(SystemExit):
+            cmd_log_path(argparse.Namespace(data_dir=None, log_file="none"))
+        assert "disabled" in capsys.readouterr().err
+
+    @mock.patch("overlord.cli.cmd_log_path")
+    def test_main_hidden_command(self, mock_cmd):
+        main(["log-path"])
+        mock_cmd.assert_called_once()
+
+    @mock.patch("overlord.cli.cmd_log_path")
+    def test_main_with_data_dir(self, mock_cmd):
+        main(["log-path", "--data-dir", "/tmp/test"])
+        ns = mock_cmd.call_args[0][0]
+        assert ns.data_dir == "/tmp/test"
+
+    @mock.patch("overlord.cli.cmd_log_path")
+    def test_main_with_log_file_equals(self, mock_cmd):
+        main(["log-path", "--log-file=/custom/path.log"])
+        ns = mock_cmd.call_args[0][0]
+        assert ns.log_file == "/custom/path.log"

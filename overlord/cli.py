@@ -417,6 +417,20 @@ def cmd_stop(args: argparse.Namespace) -> None:
     print("Shutdown initiated")
 
 
+def cmd_log_path(args: argparse.Namespace) -> None:
+    """Print the resolved log file path and exit."""
+    from .job_store import DEFAULT_DATA_DIR
+
+    data_dir = Path(args.data_dir) if args.data_dir else DEFAULT_DATA_DIR
+    log_file = args.log_file
+    if log_file == "auto":
+        log_file = str(data_dir / "overlord.log")
+    elif log_file and log_file.lower() == "none":
+        print("Log file disabled (--log-file=none)", file=sys.stderr)
+        sys.exit(1)
+    print(log_file)
+
+
 def cmd_rotate_log(args: argparse.Namespace) -> None:
     """Ask the daemon to rotate its log file."""
     raw = asyncio.run(_call_tool(args.mcp_url, "rotate_log", {}))
@@ -628,16 +642,24 @@ def main(argv: Optional[list[str]] = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
     # Hidden commands: not shown in --help but still usable.
-    if argv and argv[0] in ("stop", "rotate-log"):
-        ns = argparse.Namespace(mcp_url=DEFAULT_MCP_URL)
+    if argv and argv[0] in ("stop", "rotate-log", "log-path"):
+        ns = argparse.Namespace(mcp_url=DEFAULT_MCP_URL, data_dir=None, log_file="auto")
         rest = argv[1:]
         for i, arg in enumerate(rest):
             if arg == "--mcp-url" and i + 1 < len(rest):
                 ns.mcp_url = rest[i + 1]
+            elif arg == "--data-dir" and i + 1 < len(rest):
+                ns.data_dir = rest[i + 1]
+            elif arg == "--log-file" and i + 1 < len(rest):
+                ns.log_file = rest[i + 1]
+            elif arg.startswith("--log-file="):
+                ns.log_file = arg.split("=", 1)[1]
         if argv[0] == "stop":
             cmd_stop(ns)
-        else:
+        elif argv[0] == "rotate-log":
             cmd_rotate_log(ns)
+        else:
+            cmd_log_path(ns)
         return
     parser = build_parser()
     args = parser.parse_args(argv)
