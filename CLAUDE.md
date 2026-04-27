@@ -11,7 +11,7 @@ Included in the mono-repo via `git subtree` from `git@github.com:Chaos-AI-Projec
 pip install -e overlord
 
 # Run scheduler daemon
-overlord daemon [--data-dir PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT]
+overlord daemon [--data-dir PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT] [--log-file PATH]
 
 # Manage jobs via CLI (talks to daemon over MCP)
 overlord list [--status STATUS] [--mcp-url URL]
@@ -22,7 +22,8 @@ overlord unregister JOB_NAME [--mcp-url URL]
 overlord trigger JOB_NAME [--mcp-url URL]
 overlord messages [--job NAME] [--consumer NAME] [--unconsumed] [--limit N] [--text] [--mcp-url URL]
 overlord send [--consumer NAME] [--payload TEXT] [--mcp-url URL]
-overlord stop [--mcp-url URL]  # hidden from --help; asks daemon to exit gracefully
+overlord stop [--mcp-url URL]       # hidden from --help; asks daemon to exit gracefully
+overlord rotate-log [--mcp-url URL] # hidden from --help; rotates daemon log file
 
 # Run tests
 pytest overlord/tests -v

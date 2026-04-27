@@ -26,6 +26,7 @@ from .executor import run_job
 from .job_store import JobStore
 from .lock_store import LockStore
 from .maildir import CATCHALL, MaildirStore
+from .logging_config import rotate_log_handler
 from .mcp_server import create_mcp_server
 from .models import Job, JobStatus
 from .spool import SpoolProcessor, SpoolWriter
@@ -75,6 +76,7 @@ class Scheduler:
                 data_dir=self._data_dir, host=mcp_host, port=mcp_port,
                 cwd=self._cwd, spool=self._spool,
                 shutdown_callback=self.stop,
+                rotate_log_callback=rotate_log_handler,
             )
 
     async def run(self) -> None:

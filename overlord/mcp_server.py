@@ -64,6 +64,7 @@ def create_mcp_server(
     cwd: Optional[Path] = None,
     spool: Optional[SpoolWriter] = None,
     shutdown_callback=None,
+    rotate_log_callback=None,
 ):
     """Create and return a FastMCP server wired to the given stores.
 
@@ -546,5 +547,24 @@ def create_mcp_server(
         logger.info("shutdown_daemon tool invoked, requesting graceful shutdown")
         asyncio.get_running_loop().call_soon(asyncio.ensure_future, shutdown_callback())
         return json.dumps({"status": "shutdown initiated"})
+
+    @mcp.tool()
+    def rotate_log() -> str:
+        """Rotate the daemon's log file.
+
+        Closes and reopens the file-based log handler so that external
+        tools can rename the current log file beforehand and the daemon
+        will start writing to a fresh file at the original path.
+
+        Returns
+        -------
+        str
+            JSON object with a status message.
+        """
+        if rotate_log_callback is None:
+            return json.dumps({"error": "rotate_log not available (no callback registered)"})
+        result = rotate_log_callback()
+        logger.info("rotate_log tool invoked: %s", result)
+        return json.dumps({"status": result})
 
     return mcp

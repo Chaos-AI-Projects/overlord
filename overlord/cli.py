@@ -6,7 +6,7 @@ its MCP streamable-HTTP endpoint, avoiding direct database access.
 Usage::
 
     overlord init [PATH]
-    overlord daemon [--data-dir PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT]
+    overlord daemon [--data-dir PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT] [--log-file PATH]
     overlord list [--status STATUS] [--mcp-url URL]
     overlord status JOB_NAME [--mcp-url URL]
     overlord register --name NAME --cron EXPR --command CMD [options] [--mcp-url URL]
@@ -291,7 +291,7 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     from .logging_config import setup_logging
     from .scheduler import Scheduler
 
-    setup_logging()
+    setup_logging(log_file=args.log_file)
 
     scheduler = Scheduler(
         data_dir=Path(args.data_dir) if args.data_dir else None,
@@ -405,6 +405,16 @@ def cmd_stop(args: argparse.Namespace) -> None:
         print(f"Error: {data['error']}", file=sys.stderr)
         sys.exit(1)
     print("Shutdown initiated")
+
+
+def cmd_rotate_log(args: argparse.Namespace) -> None:
+    """Ask the daemon to rotate its log file."""
+    raw = asyncio.run(_call_tool(args.mcp_url, "rotate_log", {}))
+    data = json.loads(raw)
+    if "error" in data:
+        print(f"Error: {data['error']}", file=sys.stderr)
+        sys.exit(1)
+    print(data.get("status", "done"))
 
 
 def cmd_send(args: argparse.Namespace) -> None:
@@ -525,6 +535,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_daemon.add_argument("--tick", type=int, default=60, help="Tick interval in seconds (default: 60)")
     p_daemon.add_argument("--mcp-host", default="127.0.0.1", help="MCP bind address (default: 127.0.0.1)")
     p_daemon.add_argument("--mcp-port", type=int, default=8000, help="MCP port (default: 8000)")
+    p_daemon.add_argument("--log-file", metavar="PATH", help="Write logs to FILE in addition to stderr")
     p_daemon.set_defaults(func=cmd_daemon)
 
     # list
@@ -605,14 +616,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
-    # Hidden command: 'stop' is not shown in --help but is still usable.
-    if argv and argv[0] == "stop":
+    # Hidden commands: not shown in --help but still usable.
+    if argv and argv[0] in ("stop", "rotate-log"):
         ns = argparse.Namespace(mcp_url=DEFAULT_MCP_URL)
         rest = argv[1:]
         for i, arg in enumerate(rest):
             if arg == "--mcp-url" and i + 1 < len(rest):
                 ns.mcp_url = rest[i + 1]
-        cmd_stop(ns)
+        if argv[0] == "stop":
+            cmd_stop(ns)
+        else:
+            cmd_rotate_log(ns)
         return
     parser = build_parser()
     args = parser.parse_args(argv)
