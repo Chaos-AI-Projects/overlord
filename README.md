@@ -268,6 +268,16 @@ nix build .#overlord   # or: nix build (default package)
 pytest overlord/tests -v
 ```
 
+## Migrating from SQLite
+
+If upgrading from an older SQLite-backed Overlord installation, use the bundled migration script:
+
+```bash
+python -m overlord.scripts.migrate_sqlite_to_json [--db PATH] [--data-dir PATH]
+```
+
+This reads jobs and execution history from the legacy `overlord.db` SQLite database and writes them as JSON files into the file-based storage layout. The original database is not modified.
+
 ## License
 
 See [LICENSE](LICENSE).
