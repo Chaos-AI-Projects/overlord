@@ -393,6 +393,32 @@ def cmd_init(args: argparse.Namespace) -> None:
         created = job_store.create_job(job)
         print(f"Registered job 'overlord'")
 
+    # Send an init-complete message to the overlord mailbox
+    from importlib.metadata import version as pkg_version
+
+    from . import maildir as _maildir
+    from . import spool as _spool
+
+    try:
+        ver = pkg_version("overlord")
+    except Exception:
+        ver = "unknown"
+
+    payload = json.dumps({
+        "event": "init_complete",
+        "version": ver,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "vault_path": str(vault),
+    })
+    spool_writer = _spool.SpoolWriter(data_dir=data_dir)
+    email_msg = _maildir.MaildirStore.build_message(
+        payload=payload,
+        consumer="overlord",
+        job_name="init",
+    )
+    spool_writer.write(email_msg)
+    print("Sent init_complete message to overlord")
+
     print(f"\nVault initialized at {vault}")
     print(f"Start the daemon with: overlord daemon")
 

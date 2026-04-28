@@ -28,8 +28,12 @@ def default_data_dir(tmp_path, monkeypatch):
     """Redirect DEFAULT_DATA_DIR to a temp directory for test isolation."""
     data_dir = tmp_path / "data" / "overlord"
     import overlord.job_store as js_mod
+    import overlord.maildir as md_mod
+    import overlord.spool as sp_mod
 
     monkeypatch.setattr(js_mod, "DEFAULT_DATA_DIR", data_dir)
+    monkeypatch.setattr(md_mod, "DEFAULT_DATA_DIR", data_dir)
+    monkeypatch.setattr(sp_mod, "DEFAULT_DATA_DIR", data_dir)
     return data_dir
 
 
@@ -349,3 +353,43 @@ class TestPreExistingFiles:
         assert (vault / "CLAUDE.md").read_text() == "my custom claude md"
         # origin/ should have the template version
         assert (vault / "origin" / "CLAUDE.md").exists()
+
+
+class TestInitMessage:
+    """Tests for the init_complete message sent to the overlord mailbox."""
+
+    def test_init_sends_spool_message(self, tmp_path, default_data_dir):
+        vault = tmp_path / "vault"
+        args = build_parser().parse_args(["init", str(vault)])
+        cmd_init(args)
+
+        spool_dir = default_data_dir / "spool"
+        spool_files = [f for f in spool_dir.iterdir() if f.is_file()]
+        assert len(spool_files) == 1
+
+    def test_init_message_payload(self, tmp_path, default_data_dir):
+        vault = tmp_path / "vault"
+        args = build_parser().parse_args(["init", str(vault)])
+        cmd_init(args)
+
+        spool_dir = default_data_dir / "spool"
+        spool_files = [f for f in spool_dir.iterdir() if f.is_file()]
+        msg_bytes = spool_files[0].read_bytes()
+
+        from email import policy
+        from email.parser import BytesParser
+
+        msg = BytesParser(policy=policy.default).parsebytes(msg_bytes)
+
+        # Extract payload from attachment
+        payload_json = None
+        for part in msg.walk():
+            if part.get_filename() == "payload.json":
+                payload_json = json.loads(part.get_content())
+                break
+
+        assert payload_json is not None
+        assert payload_json["event"] == "init_complete"
+        assert "version" in payload_json
+        assert "timestamp" in payload_json
+        assert payload_json["vault_path"] == str(vault)
