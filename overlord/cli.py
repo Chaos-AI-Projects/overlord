@@ -165,19 +165,14 @@ def _print_job_table(raw: str) -> None:
         print("No jobs found.")
         return
 
-    # Table header
-    fmt = "{:<25} {:<20} {:<10} {:<12} {:<20}"
-    print(fmt.format("NAME", "CRON", "STATUS", "QUEUE", "CONSUMES"))
-    print("-" * 89)
+    print(f"Jobs ({len(jobs)}):")
     for j in jobs:
         consumes = ", ".join(j.get("consumes", []))
-        print(fmt.format(
-            j.get("name", "")[:25],
-            j.get("cron_expression", "")[:20],
-            j.get("status", ""),
-            j.get("queue_name", "default")[:12],
-            consumes[:20] if consumes else "-",
-        ))
+        print(f"  - name: {j.get('name', '')}")
+        print(f"    cron: {j.get('cron_expression', '')}")
+        print(f"    status: {j.get('status', '')}")
+        print(f"    queue: {j.get('queue_name', 'default')}")
+        print(f"    consumes: {consumes if consumes else '-'}")
 
 
 def _print_job_status(raw: str) -> None:
@@ -214,17 +209,12 @@ def _print_job_status(raw: str) -> None:
     execs = data.get("recent_executions", [])
     if execs:
         print(f"\nRecent executions ({len(execs)}):")
-        efmt = "  {:<6} {:<10} {:<6} {:<20} {:<20}"
-        print(efmt.format("ID", "STATUS", "EXIT", "STARTED", "FINISHED"))
-        print("  " + "-" * 64)
         for e in execs:
-            print(efmt.format(
-                e.get("id", ""),
-                e.get("status", ""),
-                str(e.get("exit_code", "")),
-                _utc_to_local(str(e.get("started_at", "")))[:20],
-                _utc_to_local(str(e.get("finished_at", "")))[:20],
-            ))
+            print(f"  - id: {e.get('id', '')}")
+            print(f"    status: {e.get('status', '')}")
+            print(f"    exit_code: {e.get('exit_code', '')}")
+            print(f"    started: {_utc_to_local(str(e.get('started_at', '')))}")
+            print(f"    finished: {_utc_to_local(str(e.get('finished_at', '')))}")
     else:
         print("\nNo recent executions.")
 
