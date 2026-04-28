@@ -17,6 +17,7 @@ The following skills are installed in `.claude/commands/` and available as slash
 - `/unregister-job` — Remove an existing job from the scheduler
 - `/update-job` — Modify parameters of an existing job (cron, command, timeout, etc.)
 - `/rotate-log` — Rotate the daemon log file (close and reopen the file handler)
+- `/merge-from-origin` — Merge upstream template changes from `origin/` into working copies
 
 Use these skills for guided, interactive job management instead of running CLI commands manually.
 

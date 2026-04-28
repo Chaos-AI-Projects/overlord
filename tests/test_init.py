@@ -65,6 +65,7 @@ class TestCmdInit:
         assert (commands_dir / "unregister-job.md").exists()
         assert (commands_dir / "update-job.md").exists()
         assert (commands_dir / "rotate-log.md").exists()
+        assert (commands_dir / "merge-from-origin.md").exists()
 
     def test_skills_content(self, tmp_path, default_data_dir):
         vault = tmp_path / "vault"
@@ -75,6 +76,8 @@ class TestCmdInit:
         assert "overlord register" in register
         update = (vault / ".claude" / "commands" / "update-job.md").read_text()
         assert "overlord update" in update
+        merge = (vault / ".claude" / "commands" / "merge-from-origin.md").read_text()
+        assert "origin/" in merge
 
     def test_wrapper_script_executable(self, tmp_path, default_data_dir):
         vault = tmp_path / "vault"
