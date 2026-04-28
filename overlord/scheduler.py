@@ -129,7 +129,10 @@ class Scheduler:
 
     async def _run_mcp_server(self) -> None:
         """Run the MCP streamable-HTTP server."""
-        await self._mcp_server.run_streamable_http_async()
+        try:
+            await self._mcp_server.run_streamable_http_async()
+        except asyncio.CancelledError:
+            pass
 
     def _install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
@@ -139,6 +142,27 @@ class Scheduler:
     def _on_signal(self, sig: signal.Signals) -> None:
         logger.info("Received %s, initiating shutdown", sig.name)
         self._stop_event.set()
+
+    def _reap_finished_tasks(self) -> set[str]:
+        """Reap finished tasks and return the set of freed queue names."""
+        finished = [name for name, t in self._running_tasks.items() if t.done()]
+        queues_freed: set[str] = set()
+        for name in finished:
+            task = self._running_tasks.pop(name)
+            if not task.cancelled() and task.exception():
+                logger.error(
+                    "job=%s task raised: %s", name, task.exception(),
+                )
+            if name in self._queue_tasks:
+                queue_name, _ = self._queue_tasks.pop(name)
+                queues_freed.add(queue_name)
+        return queues_freed
+
+    def _drain_freed_queues(self, queues_freed: set[str]) -> None:
+        """Drain pending jobs for queues that no longer have an active task."""
+        for queue_name in queues_freed:
+            if queue_name not in self._active_queue_names():
+                self._drain_pending_queue(queue_name)
 
     def _active_queue_names(self) -> set[str]:
         """Return the set of queue names that currently have a running task."""
@@ -202,22 +226,8 @@ class Scheduler:
         jobs = self._job_store.list_jobs(status=JobStatus.ENABLED)
 
         # Clean up finished tasks and drain their queues.
-        finished = [name for name, t in self._running_tasks.items() if t.done()]
-        queues_freed: set[str] = set()
-        for name in finished:
-            task = self._running_tasks.pop(name)
-            if not task.cancelled() and task.exception():
-                logger.error(
-                    "job=%s task raised: %s", name, task.exception(),
-                )
-            if name in self._queue_tasks:
-                queue_name, _ = self._queue_tasks.pop(name)
-                queues_freed.add(queue_name)
-
-        # Drain pending jobs for freed queues.
-        for queue_name in queues_freed:
-            if queue_name not in self._active_queue_names():
-                self._drain_pending_queue(queue_name)
+        queues_freed = self._reap_finished_tasks()
+        self._drain_freed_queues(queues_freed)
 
         busy_queues = self._active_queue_names()
 
@@ -293,8 +303,65 @@ class Scheduler:
                 "job=%s auto-consumed %d message(s)", job.name, len(input_messages),
             )
 
-    async def _shutdown(self) -> None:
-        """Wait for running jobs to finish, with a grace period."""
+    async def _shutdown(self, job_timeout: float = 30.0) -> None:
+        """Graceful shutdown: drain queues, wait for jobs, then clean up.
+
+        1. Block new task scheduling (already done — the run() loop has exited).
+        2. Wait for all running and queued tasks to finish (each job gets at
+           most *job_timeout* seconds before being cancelled).
+        3. Clean up infrastructure (MCP server, spool processor).
+        """
+        # Wait for all running jobs to finish and drain pending queues
+        # as their queue slots free up.
+        while True:
+            active = [t for t in self._running_tasks.values() if not t.done()]
+            has_pending = any(self._pending_queues.values())
+
+            if not active and not has_pending:
+                break
+
+            if active:
+                logger.info(
+                    "Waiting for %d running job(s) to finish "
+                    "(pending queued: %s)…",
+                    len(active),
+                    {q: len(p) for q, p in self._pending_queues.items() if p}
+                    or "none",
+                )
+                done, _ = await asyncio.wait(
+                    active,
+                    timeout=job_timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if not done:
+                    # Timeout: cancel all still-running tasks.
+                    timed_out = [
+                        name for name, t in self._running_tasks.items()
+                        if not t.done()
+                    ]
+                    logger.warning(
+                        "Shutdown timeout (%.0fs) — cancelling jobs: %s",
+                        job_timeout, timed_out,
+                    )
+                    for name in timed_out:
+                        self._running_tasks[name].cancel()
+                    # Give cancelled tasks a moment to finish.
+                    await asyncio.wait(
+                        [self._running_tasks[n] for n in timed_out],
+                        timeout=5,
+                    )
+
+                queues_freed = self._reap_finished_tasks()
+                self._drain_freed_queues(queues_freed)
+            elif has_pending:
+                # Pending items with no active tasks — drain all idle queues.
+                for queue_name in list(self._pending_queues.keys()):
+                    if queue_name not in self._active_queue_names():
+                        self._drain_pending_queue(queue_name)
+
+        logger.info("All jobs finished")
+
         # Stop the spool processor (drains remaining messages before exiting).
         if self._spool_task is not None and not self._spool_task.done():
             self._spool_processor.stop()
@@ -305,28 +372,16 @@ class Scheduler:
             logger.info("Spool processor stopped")
 
         # Stop the MCP server.
+        # Grace delay lets the in-flight shutdown response complete before
+        # we cancel the task, avoiding noisy CancelledError tracebacks (#167).
         if self._mcp_task is not None and not self._mcp_task.done():
+            await asyncio.sleep(0.5)
             self._mcp_task.cancel()
             try:
                 await asyncio.wait_for(self._mcp_task, timeout=5)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
             logger.info("MCP server stopped")
-
-        active = [t for t in self._running_tasks.values() if not t.done()]
-        if not active:
-            logger.info("No running jobs, shutdown complete")
-            return
-
-        logger.info("Waiting for %d running job(s) to finish…", len(active))
-        self._cancel_event.set()  # signal executors to stop retrying
-
-        done, pending = await asyncio.wait(active, timeout=30)
-        for task in pending:
-            logger.warning("Force-cancelling task %s", task.get_name())
-            task.cancel()
-        if pending:
-            await asyncio.wait(pending, timeout=5)
 
         self._lock_store.release_stale_locks(self._execution_log)
         logger.info("Shutdown complete")
