@@ -57,6 +57,19 @@
       pkgs.nodejs        # Node.js LTS
       pkgs.which
       pkgs.less
+      pkgs.diffutils       # diff, cmp
+      pkgs.patch            # patch
+      pkgs.gnumake          # make
+      pkgs.gawk             # awk
+      pkgs.gnutar           # tar
+      pkgs.gzip             # gzip
+      pkgs.zip              # zip archiving
+      pkgs.unzip            # zip extraction
+      pkgs.wget             # HTTP downloader
+      pkgs.vim              # terminal text editor
+      pkgs.tmux             # terminal multiplexer
+      pkgs.iproute2         # ss, ip (network diagnostics)
+      pkgs.lsof             # file diagnostics
     ];
 
     binPath = lib.makeBinPath runtimePackages;
