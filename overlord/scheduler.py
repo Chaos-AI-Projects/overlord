@@ -297,7 +297,57 @@ class Scheduler:
             )
 
     async def _shutdown(self) -> None:
-        """Wait for running jobs to finish, with a grace period."""
+        """Graceful shutdown: drain queues, wait for jobs, then clean up.
+
+        1. Block new task scheduling (already done — the run() loop has exited).
+        2. Wait for all running and queued tasks to finish.
+        3. Clean up infrastructure (MCP server, spool processor).
+        """
+        # Wait for all running jobs to finish and drain pending queues
+        # as their queue slots free up.
+        while True:
+            active = [t for t in self._running_tasks.values() if not t.done()]
+            has_pending = any(self._pending_queues.values())
+
+            if not active and not has_pending:
+                break
+
+            if active:
+                logger.info(
+                    "Waiting for %d running job(s) to finish "
+                    "(pending queued: %s)…",
+                    len(active),
+                    {q: len(p) for q, p in self._pending_queues.items() if p}
+                    or "none",
+                )
+                await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+
+                # Clean up finished tasks and drain freed queues.
+                finished = [
+                    name for name, t in self._running_tasks.items() if t.done()
+                ]
+                queues_freed: set[str] = set()
+                for name in finished:
+                    task = self._running_tasks.pop(name)
+                    if not task.cancelled() and task.exception():
+                        logger.error(
+                            "job=%s task raised: %s", name, task.exception(),
+                        )
+                    if name in self._queue_tasks:
+                        queue_name, _ = self._queue_tasks.pop(name)
+                        queues_freed.add(queue_name)
+
+                for queue_name in queues_freed:
+                    if queue_name not in self._active_queue_names():
+                        self._drain_pending_queue(queue_name)
+            elif has_pending:
+                # Pending items with no active tasks — drain all idle queues.
+                for queue_name in list(self._pending_queues.keys()):
+                    if queue_name not in self._active_queue_names():
+                        self._drain_pending_queue(queue_name)
+
+        logger.info("All jobs finished")
+
         # Stop the spool processor (drains remaining messages before exiting).
         if self._spool_task is not None and not self._spool_task.done():
             self._spool_processor.stop()
@@ -318,21 +368,6 @@ class Scheduler:
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
             logger.info("MCP server stopped")
-
-        active = [t for t in self._running_tasks.values() if not t.done()]
-        if not active:
-            logger.info("No running jobs, shutdown complete")
-            return
-
-        logger.info("Waiting for %d running job(s) to finish…", len(active))
-        self._cancel_event.set()  # signal executors to stop retrying
-
-        done, pending = await asyncio.wait(active, timeout=30)
-        for task in pending:
-            logger.warning("Force-cancelling task %s", task.get_name())
-            task.cancel()
-        if pending:
-            await asyncio.wait(pending, timeout=5)
 
         self._lock_store.release_stale_locks(self._execution_log)
         logger.info("Shutdown complete")
