@@ -143,6 +143,27 @@ class Scheduler:
         logger.info("Received %s, initiating shutdown", sig.name)
         self._stop_event.set()
 
+    def _reap_finished_tasks(self) -> set[str]:
+        """Reap finished tasks and return the set of freed queue names."""
+        finished = [name for name, t in self._running_tasks.items() if t.done()]
+        queues_freed: set[str] = set()
+        for name in finished:
+            task = self._running_tasks.pop(name)
+            if not task.cancelled() and task.exception():
+                logger.error(
+                    "job=%s task raised: %s", name, task.exception(),
+                )
+            if name in self._queue_tasks:
+                queue_name, _ = self._queue_tasks.pop(name)
+                queues_freed.add(queue_name)
+        return queues_freed
+
+    def _drain_freed_queues(self, queues_freed: set[str]) -> None:
+        """Drain pending jobs for queues that no longer have an active task."""
+        for queue_name in queues_freed:
+            if queue_name not in self._active_queue_names():
+                self._drain_pending_queue(queue_name)
+
     def _active_queue_names(self) -> set[str]:
         """Return the set of queue names that currently have a running task."""
         active: set[str] = set()
@@ -205,22 +226,8 @@ class Scheduler:
         jobs = self._job_store.list_jobs(status=JobStatus.ENABLED)
 
         # Clean up finished tasks and drain their queues.
-        finished = [name for name, t in self._running_tasks.items() if t.done()]
-        queues_freed: set[str] = set()
-        for name in finished:
-            task = self._running_tasks.pop(name)
-            if not task.cancelled() and task.exception():
-                logger.error(
-                    "job=%s task raised: %s", name, task.exception(),
-                )
-            if name in self._queue_tasks:
-                queue_name, _ = self._queue_tasks.pop(name)
-                queues_freed.add(queue_name)
-
-        # Drain pending jobs for freed queues.
-        for queue_name in queues_freed:
-            if queue_name not in self._active_queue_names():
-                self._drain_pending_queue(queue_name)
+        queues_freed = self._reap_finished_tasks()
+        self._drain_freed_queues(queues_freed)
 
         busy_queues = self._active_queue_names()
 
@@ -296,11 +303,12 @@ class Scheduler:
                 "job=%s auto-consumed %d message(s)", job.name, len(input_messages),
             )
 
-    async def _shutdown(self) -> None:
+    async def _shutdown(self, job_timeout: float = 30.0) -> None:
         """Graceful shutdown: drain queues, wait for jobs, then clean up.
 
         1. Block new task scheduling (already done — the run() loop has exited).
-        2. Wait for all running and queued tasks to finish.
+        2. Wait for all running and queued tasks to finish (each job gets at
+           most *job_timeout* seconds before being cancelled).
         3. Clean up infrastructure (MCP server, spool processor).
         """
         # Wait for all running jobs to finish and drain pending queues
@@ -320,26 +328,32 @@ class Scheduler:
                     {q: len(p) for q, p in self._pending_queues.items() if p}
                     or "none",
                 )
-                await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(
+                    active,
+                    timeout=job_timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
 
-                # Clean up finished tasks and drain freed queues.
-                finished = [
-                    name for name, t in self._running_tasks.items() if t.done()
-                ]
-                queues_freed: set[str] = set()
-                for name in finished:
-                    task = self._running_tasks.pop(name)
-                    if not task.cancelled() and task.exception():
-                        logger.error(
-                            "job=%s task raised: %s", name, task.exception(),
-                        )
-                    if name in self._queue_tasks:
-                        queue_name, _ = self._queue_tasks.pop(name)
-                        queues_freed.add(queue_name)
+                if not done:
+                    # Timeout: cancel all still-running tasks.
+                    timed_out = [
+                        name for name, t in self._running_tasks.items()
+                        if not t.done()
+                    ]
+                    logger.warning(
+                        "Shutdown timeout (%.0fs) — cancelling jobs: %s",
+                        job_timeout, timed_out,
+                    )
+                    for name in timed_out:
+                        self._running_tasks[name].cancel()
+                    # Give cancelled tasks a moment to finish.
+                    await asyncio.wait(
+                        [self._running_tasks[n] for n in timed_out],
+                        timeout=5,
+                    )
 
-                for queue_name in queues_freed:
-                    if queue_name not in self._active_queue_names():
-                        self._drain_pending_queue(queue_name)
+                queues_freed = self._reap_finished_tasks()
+                self._drain_freed_queues(queues_freed)
             elif has_pending:
                 # Pending items with no active tasks — drain all idle queues.
                 for queue_name in list(self._pending_queues.keys()):
