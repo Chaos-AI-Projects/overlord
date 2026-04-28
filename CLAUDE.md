@@ -25,6 +25,7 @@ overlord send [--consumer NAME] [--payload TEXT] [--mcp-url URL]
 overlord stop [--mcp-url URL]       # hidden from --help; asks daemon to exit gracefully
 overlord log-path [--data-dir PATH] [--log-file PATH]  # hidden; prints resolved log file path
 overlord rotate-log [--mcp-url URL] # hidden from --help; rotates daemon log file
+overlord daemon-status [--mcp-url URL]  # hidden; shows daemon status, jobs, queues, log path, mailboxes
 
 # Run tests
 pytest overlord/tests -v

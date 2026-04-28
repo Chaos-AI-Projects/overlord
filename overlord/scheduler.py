@@ -77,6 +77,7 @@ class Scheduler:
                 cwd=self._cwd, spool=self._spool,
                 shutdown_callback=self.stop,
                 rotate_log_callback=rotate_log_handler,
+                status_callback=self._get_status,
             )
 
     async def run(self) -> None:
@@ -124,6 +125,27 @@ class Scheduler:
         """Request a graceful stop."""
         logger.info("Stop requested")
         self._stop_event.set()
+
+    def _get_status(self) -> dict:
+        """Return a snapshot of the scheduler's runtime state."""
+        running = []
+        for name, task in self._running_tasks.items():
+            if not task.done():
+                queue_name = None
+                if name in self._queue_tasks:
+                    queue_name = self._queue_tasks[name][0]
+                running.append({"job": name, "queue": queue_name})
+
+        pending = {}
+        for queue_name, items in self._pending_queues.items():
+            if items:
+                pending[queue_name] = [job.name for job, _ in items]
+
+        return {
+            "tick_seconds": self._tick_seconds,
+            "running_tasks": running,
+            "pending_queues": pending,
+        }
 
     # -- internals --
 

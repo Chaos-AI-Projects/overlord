@@ -65,6 +65,7 @@ def create_mcp_server(
     spool: Optional[SpoolWriter] = None,
     shutdown_callback=None,
     rotate_log_callback=None,
+    status_callback=None,
 ):
     """Create and return a FastMCP server wired to the given stores.
 
@@ -532,6 +533,54 @@ def create_mcp_server(
         await asyncio.sleep(0.05)
         logger.info("Manually triggered job %r", name)
         return json.dumps({"status": "triggered", "job": _job_to_dict(job)})
+
+    @mcp.tool()
+    def get_daemon_status() -> str:
+        """Get the daemon's overall running status.
+
+        Returns job list, running queue status, log file location,
+        and maildir mailbox list.
+
+        Returns
+        -------
+        str
+            JSON object with daemon status information.
+        """
+        # Jobs
+        jobs = job_store.list_jobs()
+        job_summaries = []
+        for j in jobs:
+            job_summaries.append({
+                "name": j.name,
+                "cron_expression": j.cron_expression,
+                "status": j.status.value,
+                "queue_name": j.queue_name,
+            })
+
+        # Maildir mailboxes
+        mailboxes = maildir_store.list_mailboxes()
+
+        # Log file path
+        log_path = None
+        root_logger = logging.getLogger("overlord")
+        for handler in root_logger.handlers:
+            if isinstance(handler, logging.FileHandler):
+                log_path = handler.baseFilename
+                break
+
+        # Scheduler runtime status (running tasks, queues)
+        scheduler_status = {}
+        if status_callback is not None:
+            scheduler_status = status_callback()
+
+        result = {
+            "daemon": "running",
+            "jobs": job_summaries,
+            "scheduler": scheduler_status,
+            "log_file": log_path,
+            "mailboxes": mailboxes,
+        }
+        return json.dumps(result)
 
     @mcp.tool()
     async def shutdown_daemon() -> str:

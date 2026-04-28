@@ -544,6 +544,75 @@ def cmd_log_path(args: argparse.Namespace) -> None:
     print(log_file)
 
 
+def cmd_daemon_status(args: argparse.Namespace) -> None:
+    """Show the daemon's overall running status."""
+    raw = asyncio.run(_call_tool(args.mcp_url, "get_daemon_status", {}))
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        print(raw)
+        return
+
+    if isinstance(data, dict) and "error" in data:
+        print(f"Error: {data['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Daemon:   {data.get('daemon', 'unknown')}")
+
+    # Log file
+    log_file = data.get("log_file")
+    print(f"Log file: {log_file or '(disabled)'}")
+
+    # Scheduler info
+    sched = data.get("scheduler", {})
+    tick = sched.get("tick_seconds")
+    if tick is not None:
+        print(f"Tick:     {tick}s")
+
+    # Running tasks
+    running = sched.get("running_tasks", [])
+    print(f"\nRunning tasks ({len(running)}):")
+    if running:
+        for r in running:
+            queue_info = f" (queue={r['queue']})" if r.get("queue") else ""
+            print(f"  - {r['job']}{queue_info}")
+    else:
+        print("  (none)")
+
+    # Pending queues
+    pending = sched.get("pending_queues", {})
+    if pending:
+        print(f"\nPending queues:")
+        for queue_name, job_names in pending.items():
+            print(f"  {queue_name}: {', '.join(job_names)}")
+
+    # Jobs
+    jobs = data.get("jobs", [])
+    print(f"\nJobs ({len(jobs)}):")
+    if jobs:
+        fmt = "  {:<25} {:<20} {:<10} {:<12}"
+        print(fmt.format("NAME", "CRON", "STATUS", "QUEUE"))
+        print("  " + "-" * 65)
+        for j in jobs:
+            print(fmt.format(
+                j.get("name", "")[:25],
+                j.get("cron_expression", "")[:20],
+                j.get("status", ""),
+                j.get("queue_name", "default")[:12],
+            ))
+    else:
+        print("  (none)")
+
+    # Mailboxes
+    mailboxes = data.get("mailboxes", [])
+    print(f"\nMailboxes ({len(mailboxes)}):")
+    if mailboxes:
+        for mb in mailboxes:
+            print(f"  - {mb}")
+    else:
+        print("  (none)")
+
+
 def cmd_rotate_log(args: argparse.Namespace) -> None:
     """Ask the daemon to rotate its log file."""
     raw = asyncio.run(_call_tool(args.mcp_url, "rotate_log", {}))
@@ -755,7 +824,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
     # Hidden commands: not shown in --help but still usable.
-    if argv and argv[0] in ("stop", "rotate-log", "log-path"):
+    if argv and argv[0] in ("stop", "rotate-log", "log-path", "daemon-status"):
         ns = argparse.Namespace(mcp_url=DEFAULT_MCP_URL, data_dir=None, log_file="auto")
         rest = argv[1:]
         for i, arg in enumerate(rest):
@@ -771,6 +840,8 @@ def main(argv: Optional[list[str]] = None) -> None:
             cmd_stop(ns)
         elif argv[0] == "rotate-log":
             cmd_rotate_log(ns)
+        elif argv[0] == "daemon-status":
+            cmd_daemon_status(ns)
         else:
             cmd_log_path(ns)
         return
