@@ -590,19 +590,15 @@ def cmd_daemon_status(args: argparse.Namespace) -> None:
     jobs = data.get("jobs", [])
     print(f"\nJobs ({len(jobs)}):")
     if jobs:
-        names = [j.get("name", "") for j in jobs]
-        crons = [j.get("cron_expression", "") for j in jobs]
-        statuses = [j.get("status", "") for j in jobs]
-        queues = [j.get("queue_name", "default") for j in jobs]
-        w_n = max(len("NAME"), max(len(v) for v in names))
-        w_c = max(len("CRON"), max(len(v) for v in crons))
-        w_s = max(len("STATUS"), max(len(v) for v in statuses))
-        w_q = max(len("QUEUE"), max(len(v) for v in queues))
-        fmt = f"  {{:<{w_n}}} {{:<{w_c}}} {{:<{w_s}}} {{:<{w_q}}}"
-        print(fmt.format("NAME", "CRON", "STATUS", "QUEUE"))
-        print("  " + "-" * (w_n + w_c + w_s + w_q + 3))
-        for name, cron, status, queue in zip(names, crons, statuses, queues):
-            print(fmt.format(name, cron, status, queue))
+        for j in jobs:
+            name = j.get("name", "")
+            cron = j.get("cron_expression", "")
+            status = j.get("status", "")
+            queue = j.get("queue_name", "default")
+            print(f"  - name: {name}")
+            print(f"    cron: {cron}")
+            print(f"    status: {status}")
+            print(f"    queue: {queue}")
     else:
         print("  (none)")
 
