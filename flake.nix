@@ -100,6 +100,10 @@ PYEOF
       # Create /etc/localtime symlink (always UTC; TZ is a runtime variable)
       ln -sf "${pkgs.tzdata}/share/zoneinfo/UTC" /etc/localtime
 
+      # Symlink /usr/share/zoneinfo for apps that don't use TZDIR (e.g., Go, Java)
+      mkdir -p /usr/share
+      ln -sfn "${pkgs.tzdata}/share/zoneinfo" /usr/share/zoneinfo
+
       # Initialize the vault (scripts, CLAUDE.md) in /home/overlord/brain;
       # the database is created at DEFAULT_DB_PATH (~/.local/share/overlord/overlord.db)
       cd /home/overlord/brain
