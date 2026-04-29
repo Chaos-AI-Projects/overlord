@@ -84,7 +84,7 @@ PYEOF
       pkgs.iproute2         # ss, ip (network diagnostics)
       pkgs.lsof             # file diagnostics
       pkgs.matrix-commander # Matrix protocol CLI client
-      pkgs.podman-remote    # Podman CLI (talks to host socket)
+      pkgs.podman           # Podman CLI (talks to host socket)
     ];
 
     binPath = lib.makeBinPath runtimePackages;
