@@ -150,7 +150,9 @@ podman run -d \
   --userns=keep-id \
   -p 8000:8000 \
   -v ~/overlord-data:/home/overlord:Z \
+  -v /run/user/$(id -u)/podman/podman.sock:/run/podman/podman.sock:Z \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e CONTAINER_HOST=unix:///run/podman/podman.sock \
   overlord:latest
 ```
 
@@ -161,6 +163,7 @@ Replace `podman` with `docker` if using Docker. The container:
 - Auto-installs `claude-code` on first start into the volume
 - UID mapping is handled by podman (`--userns=keep-id`) rather than inside the container
 - Passes any extra arguments to `overlord daemon` (e.g., `--tick 30`)
+- Mounts the host's podman socket so `podman-remote` can manage containers from inside
 
 ### Building just the Python package
 

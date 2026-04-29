@@ -84,6 +84,7 @@ PYEOF
       pkgs.iproute2         # ss, ip (network diagnostics)
       pkgs.lsof             # file diagnostics
       pkgs.matrix-commander # Matrix protocol CLI client
+      pkgs.podman-remote    # Podman CLI (talks to host socket)
     ];
 
     binPath = lib.makeBinPath runtimePackages;
@@ -156,6 +157,7 @@ NSS
           "HOME=/home/overlord"
           "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
           "NIX_SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+          "CONTAINER_HOST=unix:///run/podman/podman.sock"
         ];
         WorkingDir = "/home/overlord";
       };
