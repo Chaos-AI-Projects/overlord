@@ -85,6 +85,7 @@ PYEOF
       pkgs.lsof             # file diagnostics
       pkgs.matrix-commander # Matrix protocol CLI client
       pkgs.podman           # Podman CLI (talks to host socket)
+      pkgs.tzdata           # IANA timezone database
     ];
 
     binPath = lib.makeBinPath runtimePackages;
@@ -95,6 +96,11 @@ PYEOF
 
       export HOME=/home/overlord
       mkdir -p /home/overlord/.local/share /home/overlord/brain
+
+      # Create /etc/localtime symlink so the C library honours $TZ
+      if [ -n "''${TZ:-}" ] && [ -f "${pkgs.tzdata}/share/zoneinfo/$TZ" ]; then
+        ln -sf "${pkgs.tzdata}/share/zoneinfo/$TZ" /etc/localtime
+      fi
 
       # Initialize the vault (scripts, CLAUDE.md) in /home/overlord/brain;
       # the database is created at DEFAULT_DB_PATH (~/.local/share/overlord/overlord.db)
@@ -157,6 +163,7 @@ NSS
           "HOME=/home/overlord"
           "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
           "NIX_SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+          "TZDIR=${pkgs.tzdata}/share/zoneinfo"
           "CONTAINER_HOST=unix:///run/podman/podman.sock"
         ];
         WorkingDir = "/home/overlord";
