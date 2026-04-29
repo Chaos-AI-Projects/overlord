@@ -97,9 +97,8 @@ PYEOF
       export HOME=/home/overlord
       mkdir -p /home/overlord/.local/share /home/overlord/brain
 
-      # Create /etc/localtime symlink so the C library honours $TZ
-      _tz="''${TZ:-UTC}"
-      ln -sf "${pkgs.tzdata}/share/zoneinfo/$_tz" /etc/localtime
+      # Create /etc/localtime symlink (always UTC; TZ is a runtime variable)
+      ln -sf "${pkgs.tzdata}/share/zoneinfo/UTC" /etc/localtime
 
       # Initialize the vault (scripts, CLAUDE.md) in /home/overlord/brain;
       # the database is created at DEFAULT_DB_PATH (~/.local/share/overlord/overlord.db)
