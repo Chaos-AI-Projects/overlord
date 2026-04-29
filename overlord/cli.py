@@ -396,8 +396,8 @@ def cmd_init(args: argparse.Namespace) -> None:
     # Send an init-complete message to the overlord mailbox
     from importlib.metadata import version as pkg_version
 
-    from . import maildir as _maildir
-    from . import spool as _spool
+    from . import maildir
+    from . import spool
 
     try:
         ver = pkg_version("overlord")
@@ -410,14 +410,17 @@ def cmd_init(args: argparse.Namespace) -> None:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "vault_path": str(vault),
     })
-    spool_writer = _spool.SpoolWriter(data_dir=data_dir)
-    email_msg = _maildir.MaildirStore.build_message(
-        payload=payload,
-        consumer="overlord",
-        job_name="init",
-    )
-    spool_writer.write(email_msg)
-    print("Sent init_complete message to overlord")
+    try:
+        spool_writer = spool.SpoolWriter(data_dir=data_dir)
+        email_msg = maildir.MaildirStore.build_message(
+            payload=payload,
+            consumer="overlord",
+            job_name="init",
+        )
+        spool_writer.write(email_msg)
+        print("Sent init_complete message to overlord")
+    except Exception as exc:
+        print(f"Warning: failed to send init_complete message: {exc}")
 
     print(f"\nVault initialized at {vault}")
     print(f"Start the daemon with: overlord daemon")
