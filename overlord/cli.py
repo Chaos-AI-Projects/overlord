@@ -394,7 +394,6 @@ def cmd_init(args: argparse.Namespace) -> None:
         print(f"Registered job 'overlord'")
 
     # Send an init-complete message to the overlord mailbox
-    import subprocess as _subprocess
     from importlib.metadata import version as pkg_version
 
     from . import maildir as _maildir
@@ -404,17 +403,6 @@ def cmd_init(args: argparse.Namespace) -> None:
         ver = pkg_version("overlord")
     except Exception:
         ver = "unknown"
-
-    # Append git short hash for more granular version tracking
-    try:
-        git_hash = _subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            stderr=_subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        ver = f"{ver}+{git_hash}"
-    except Exception:
-        pass
 
     payload = json.dumps({
         "event": "init_complete",
