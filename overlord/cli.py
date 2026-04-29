@@ -394,15 +394,17 @@ def cmd_init(args: argparse.Namespace) -> None:
         print(f"Registered job 'overlord'")
 
     # Send an init-complete message to the overlord mailbox
-    from importlib.metadata import version as pkg_version
-
     from . import maildir
     from . import spool
 
     try:
-        ver = pkg_version("overlord")
-    except Exception:
-        ver = "unknown"
+        from ._version import VERSION as ver
+    except ImportError:
+        from importlib.metadata import version as pkg_version
+        try:
+            ver = pkg_version("overlord")
+        except Exception:
+            ver = "unknown"
 
     payload = json.dumps({
         "event": "init_complete",

@@ -20,14 +20,22 @@
     pythonPackages = pkgs.python312Packages;
 
     # --------------- overlord Python package ---------------
+    overlordVersion = "0.1.0+${self.shortRev or "dev"}";
+
     overlord = pythonPackages.buildPythonApplication {
       pname = "overlord";
-      version = "0.1.0";
+      version = overlordVersion;
       src = ./.;
       pyproject = true;
 
       build-system = with pythonPackages; [ setuptools wheel ];
       dependencies = with pythonPackages; [ mcp ];
+
+      preBuild = ''
+        cat > overlord/_version.py <<PYEOF
+VERSION = "${overlordVersion}"
+PYEOF
+      '';
 
       doCheck = false; # tests require a running daemon
     };
