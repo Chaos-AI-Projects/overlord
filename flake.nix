@@ -10,7 +10,12 @@
   outputs = { self, nixpkgs, nixpkgs-unstable, gws-cli }:
   let
     system = "x86_64-linux";
-    pkgs = nixpkgs.legacyPackages.${system};
+    pkgs = import nixpkgs {
+      inherit system;
+      config.permittedInsecurePackages = [
+        "olm-3.2.16"
+      ];
+    };
     pkgsUnstable = import nixpkgs-unstable {
       inherit system;
       config.allowUnfree = true;
@@ -78,6 +83,7 @@ PYEOF
       pkgs.tmux             # terminal multiplexer
       pkgs.iproute2         # ss, ip (network diagnostics)
       pkgs.lsof             # file diagnostics
+      pkgs.matrix-commander # Matrix protocol CLI client
     ];
 
     binPath = lib.makeBinPath runtimePackages;
