@@ -97,13 +97,6 @@ PYEOF
       export HOME=/home/overlord
       mkdir -p /home/overlord/.local/share /home/overlord/brain
 
-      # Create /etc/localtime symlink (always UTC; TZ is a runtime variable)
-      ln -sf "${pkgs.tzdata}/share/zoneinfo/UTC" /etc/localtime
-
-      # Symlink /usr/share/zoneinfo for apps that don't use TZDIR (e.g., Go, Java)
-      mkdir -p /usr/share
-      ln -sfn "${pkgs.tzdata}/share/zoneinfo" /usr/share/zoneinfo
-
       # Initialize the vault (scripts, CLAUDE.md) in /home/overlord/brain;
       # the database is created at DEFAULT_DB_PATH (~/.local/share/overlord/overlord.db)
       cd /home/overlord/brain
@@ -147,6 +140,11 @@ NSS
         # Provide /usr/bin/env so #!/usr/bin/env shebangs work
         mkdir -p ./usr/bin
         ln -s ${pkgs.coreutils}/bin/env ./usr/bin/env
+
+        # Timezone: bake /etc/localtime and /usr/share/zoneinfo into the image
+        ln -sf "${pkgs.tzdata}/share/zoneinfo/UTC" ./etc/localtime
+        mkdir -p ./usr/share
+        ln -sfn "${pkgs.tzdata}/share/zoneinfo" ./usr/share/zoneinfo
 
         mkdir -p ./home/overlord
         chown 1000:1000 ./home/overlord
