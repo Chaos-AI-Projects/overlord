@@ -98,10 +98,10 @@ Start the daemon, then manage jobs through CLI commands that talk to the daemon 
 ### Daemon
 
 ```bash
-overlord daemon [--data-dir PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT]
+overlord daemon [--data-dir PATH] [--tick N] [--mcp-host HOST] [--mcp-port PORT] [--log-file PATH]
 ```
 
-Starts the scheduler loop, spool processor, and MCP server. Default MCP endpoint: `http://127.0.0.1:8000/mcp/`.
+Starts the scheduler loop, spool processor, and MCP server. Default MCP endpoint: `http://127.0.0.1:8000/mcp/`. Logs are written to `<data-dir>/overlord.log` by default (override with `--log-file`).
 
 ### Job Management
 
@@ -139,6 +139,22 @@ overlord messages [--job NAME] [--consumer NAME] [--unconsumed] [--limit N] [--t
 overlord send [--consumer NAME] [--payload TEXT] [--mcp-url URL]
 ```
 
+### Daemon Control
+
+```bash
+# Graceful daemon shutdown (drains queues first)
+overlord stop [--mcp-url URL]
+
+# Show daemon state, jobs, queues, log path, mailboxes
+overlord daemon-status [--mcp-url URL]
+
+# Print resolved log file path
+overlord log-path [--data-dir PATH] [--log-file PATH]
+
+# Rotate daemon log file
+overlord rotate-log [--mcp-url URL]
+```
+
 ### Vault Scaffolding
 
 ```bash
@@ -154,6 +170,7 @@ overlord init [PATH]
 - If git is available, `overlord init` will initialize the vault as a git repo (or use the existing repo if the vault is already inside one). Template updates and working copy merges are committed automatically.
 - **Note:** When the vault is inside an existing git repository, init commits will appear in that repository's history.
 - If git is not available, `overlord init` falls back to simple copy-and-skip behavior (files are copied only if they don't already exist).
+- After initialization, an `init_complete` message is sent to confirm the vault is ready.
 
 ## Job Configuration
 
@@ -252,17 +269,22 @@ podman run -d \
   --userns=keep-id \
   -p 8000:8000 \
   -v ~/overlord-data:/home/overlord:Z \
+  -v /run/user/$(id -u)/podman/podman.sock:/run/podman/podman.sock:Z \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e CONTAINER_HOST=unix:///run/podman/podman.sock \
   overlord:latest
 ```
 
 Replace `podman` with `docker` if using Docker. The container:
 
 - Exposes the MCP server on port **8000**
-- Persists all state in the mounted volume at `/home/overlord`
+- Persists all state (jobs, execution log, mailboxes, claude-code install, brain/) in the mounted volume at `/home/overlord`
 - Auto-installs `claude-code` on first start into the volume
-- UID mapping via `--userns=keep-id` (podman)
-- Extra arguments are passed to `overlord daemon` (e.g., `--tick 30`)
+- UID mapping is handled by podman (`--userns=keep-id`) rather than inside the container
+- Passes any extra arguments to `overlord daemon` (e.g., `--tick 30`)
+- Mounts the host's podman socket so `podman-remote` can manage containers from inside
+- Includes `podman`, `python3` (with pip/venv/pandas), `matrix-commander`, and other tools
+- Timezone symlinks are baked into the image at build time (no runtime setup needed)
 
 ### Build Just the Python Package
 
