@@ -4,79 +4,91 @@ Repeatable tasks manager for AI agents. Provides cron-based job scheduling, mess
 
 ## Architecture Overview
 
-```mermaid
-graph TB
-    subgraph Daemon["Scheduler Daemon"]
-        SCHED[Scheduler Loop]
-        EXEC[Executor]
-        SPOOL[Spool Processor]
-        MCP[MCP Server]
-    end
+```
+                         +---------------------+
+                         |   Scheduler Daemon   |
+                         |                     |
+  CLI Client ---MCP/HTTP--->  MCP Server       |
+  AI Agent   ---MCP/HTTP--->    |              |
+                         |     +---> Scheduler Loop --evaluate cron--> jobs/*.json
+                         |     |        |                              (Job Definitions)
+                         |     |     dispatch
+                         |     |        |
+                         |     |        v
+                         |     |    Executor ---subprocess---> Job Process
+                         |     |        |   <--stdout JSON---     |
+                         |     |        |---acquire/release--> locks/*
+                         |     |        |---write-----------> execution.log
+                         |     |        |---deliver output---> spool/
+                         |     |                               (Delivery Queue)
+                         |     |    Spool Processor
+                         |     |        |---SIGUSR1 wake
+                         |     |        |---move to Maildir--> mailboxes/consumer/
+                         +-----+-------------------------------+
+                                                               (Maildir Messages)
 
-    subgraph Storage["File-Based Storage (~/.local/share/overlord/)"]
-        JOBS[("jobs/*.json<br/>Job Definitions")]
-        LOG[("execution.log<br/>JSON-lines History")]
-        LOCKS[("locks/*<br/>Exclusive Locks")]
-        MBOX[("mailboxes/consumer/<br/>Maildir Messages")]
-        SPOOLDIR[("spool/<br/>Delivery Queue")]
-    end
-
-    CLI[CLI Client] -->|MCP over HTTP| MCP
-    AGENT[AI Agent] -->|MCP over HTTP| MCP
-    MCP --> JOBS
-    MCP --> MBOX
-    MCP --> SPOOLDIR
-
-    SCHED -->|evaluate cron| JOBS
-    SCHED -->|dispatch| EXEC
-    EXEC -->|subprocess| PROC[Job Process]
-    EXEC -->|acquire/release| LOCKS
-    EXEC -->|write| LOG
-    PROC -->|stdout JSON| EXEC
-    EXEC -->|deliver output| SPOOLDIR
-    SPOOL -->|SIGUSR1 wake| SPOOL
-    SPOOL -->|move to Maildir| MBOX
+                   File-Based Storage: ~/.local/share/overlord/
 ```
 
 ## Job Lifecycle
 
-```mermaid
-stateDiagram-v2
-    [*] --> Registered: overlord register
-    Registered --> Enabled
-    Enabled --> Due: cron matches
-    Due --> Running: executor starts subprocess
-    Running --> Success: exit 0 + valid JSON
-    Running --> Failed: non-zero exit / invalid output
-    Running --> Timeout: exceeded timeout_seconds
-    Failed --> Retrying: retries remaining
-    Retrying --> Running: after retry_delay
-    Success --> MessageDelivery: output has consumer
-    MessageDelivery --> Spool: queued for delivery
-    Spool --> Maildir: spool processor delivers
-    Success --> [*]
-    Failed --> [*]
-    Timeout --> [*]
+```
+  overlord register
+        |
+        v
+   Registered --> Enabled
+                    |
+               cron matches
+                    |
+                    v
+                   Due
+                    |
+          executor starts subprocess
+                    |
+                    v
+                 Running
+                /   |   \
+               /    |    \
+              v     v     v
+         Success  Failed  Timeout
+           |        |       |
+           |    retries?    end
+           |     /    \
+           |    v      v
+           |  Retrying end
+           |    |
+           |  (after retry_delay --> Running)
+           |
+      output has consumer?
+         /          \
+        v            v
+  MessageDelivery   end
+        |
+        v
+      Spool
+        |
+  spool processor
+        |
+        v
+     Maildir
 ```
 
 ## Message Flow
 
-```mermaid
-sequenceDiagram
-    participant Producer as Producer Job
-    participant Executor
-    participant Spool
-    participant Maildir
-    participant Consumer as Consumer Job
-
-    Producer->>Executor: exit 0 + JSON stdout
-    Executor->>Spool: deliver {consumer, message}
-    Executor-->>Executor: send SIGUSR1 to wake spool
-    Spool->>Maildir: move to mailboxes/consumer/new/
-    Note over Maildir: RFC 822 envelope + payload.json
-    Executor->>Maildir: check unconsumed messages
-    Maildir->>Consumer: messages passed via stdin
-    Consumer->>Maildir: auto-marked consumed on success
+```
+  Producer Job        Executor          Spool           Maildir          Consumer Job
+      |                  |                |                |                  |
+      |--exit 0 + JSON-->|                |                |                  |
+      |                  |--deliver msg-->|                |                  |
+      |                  |--SIGUSR1 wake->|                |                  |
+      |                  |                |--move to       |                  |
+      |                  |                |  consumer/new->|                  |
+      |                  |                |                | (RFC 822 envelope |
+      |                  |                |                |  + payload.json)  |
+      |                  |--check unconsumed msgs-------->|                  |
+      |                  |                |                |--msgs via stdin-->|
+      |                  |                |                |<--auto-consumed---|
+      |                  |                |                |   on success      |
 ```
 
 ## Installation
