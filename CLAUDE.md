@@ -165,6 +165,37 @@ Replace `podman` with `docker` if using Docker. The container:
 - Passes any extra arguments to `overlord daemon` (e.g., `--tick 30`)
 - Mounts the host's podman socket so `podman-remote` can manage containers from inside
 
+### Running with auto-rollback
+
+Use the `run-overlord.sh` script for production deployments with automatic image rollback:
+
+```bash
+# Start with defaults (image: overlord:latest, data: ~/thebot, TZ: Australia/Sydney)
+./scripts/run-overlord.sh
+
+# Override settings via environment
+DATA_DIR=~/my-overlord TZ=UTC GRACE_PERIOD=600 ./scripts/run-overlord.sh
+```
+
+The script always tries `overlord:latest` first. If the container exits within 5 minutes (configurable via `GRACE_PERIOD`), it falls back to the last known-good image stored in `${XDG_CONFIG_HOME:-~/.config}/overlord/image-state`. If `:latest` runs for 5+ minutes, it is promoted as the new known-good image.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LATEST_IMAGE` | `overlord:latest` | Candidate image to try first |
+| `DATA_DIR` | `~/thebot` | Host directory mounted at `/home/overlord` |
+| `TZ` | `Australia/Sydney` | Container timezone |
+| `GRACE_PERIOD` | `300` | Seconds before an image is considered good |
+| `RESTART_DELAY` | `60` | Seconds to wait before restarting |
+| `CONTAINER_NAME` | `overlord` | Podman container name |
+| `IMAGE_STATE_FILE` | `~/.config/overlord/image-state` | Path to known-good image state file |
+| `PODMAN_SOCKET` | `/run/user/$(id -u)/podman/podman.sock` | Host podman socket path |
+
+Features:
+- **Host networking** (`--network=host`)
+- **Podman socket** mounted into the container
+- **Signal handling** — SIGTERM/SIGINT gracefully stops the container
+- **No exit code checking** — only runtime duration determines success/failure
+
 ### Building just the Python package
 
 From the current directory:
