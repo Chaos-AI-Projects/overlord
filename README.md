@@ -14,11 +14,11 @@ graph TB
     end
 
     subgraph Storage["File-Based Storage (~/.local/share/overlord/)"]
-        JOBS[("jobs/*.json<br/>Job Definitions")]
-        LOG[("execution.log<br/>JSON-lines History")]
-        LOCKS[("locks/*<br/>Exclusive Locks")]
-        MBOX[("mailboxes/&lt;consumer&gt;/<br/>Maildir Messages")]
-        SPOOLDIR[("spool/<br/>Delivery Queue")]
+        JOBS[("jobs/*.json\nJob Definitions")]
+        LOG[("execution.log\nJSON-lines History")]
+        LOCKS[("locks/*\nExclusive Locks")]
+        MBOX[("mailboxes/consumer/\nMaildir Messages")]
+        SPOOLDIR[("spool/\nDelivery Queue")]
     end
 
     CLI[CLI Client] -->|MCP over HTTP| MCP
