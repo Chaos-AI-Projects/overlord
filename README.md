@@ -6,7 +6,7 @@ Repeatable tasks manager for AI agents. Provides cron-based job scheduling, mess
 
 ```
                          +---------------------+
-                         |   Scheduler Daemon   |
+                         |  Scheduler Daemon   |
                          |                     |
   CLI Client ---MCP/HTTP--->  MCP Server       |
   AI Agent   ---MCP/HTTP--->    |              |
@@ -18,7 +18,7 @@ Repeatable tasks manager for AI agents. Provides cron-based job scheduling, mess
                          |     |    Executor ---subprocess---> Job Process
                          |     |        |   <--stdout JSON---     |
                          |     |        |---acquire/release--> locks/*
-                         |     |        |---write-----------> execution.log
+                         |     |        |---write------------> execution.log
                          |     |        |---deliver output---> spool/
                          |     |                               (Delivery Queue)
                          |     |    Spool Processor
@@ -83,12 +83,12 @@ Repeatable tasks manager for AI agents. Provides cron-based job scheduling, mess
       |                  |--SIGUSR1 wake->|                |                  |
       |                  |                |--move to       |                  |
       |                  |                |  consumer/new->|                  |
-      |                  |                |                | (RFC 822 envelope |
-      |                  |                |                |  + payload.json)  |
-      |                  |--check unconsumed msgs-------->|                  |
-      |                  |                |                |--msgs via stdin-->|
-      |                  |                |                |<--auto-consumed---|
-      |                  |                |                |   on success      |
+      |                  |                |                |(RFC 822 envelope |
+      |                  |                |                | + payload.json)  |
+      |                  |--check unconsumed msgs--------->|                  |
+      |                  |                |                |--msgs via stdin->|
+      |                  |                |                |<--auto-consumed--|
+      |                  |                |                |   on success     |
 ```
 
 ## Installation
