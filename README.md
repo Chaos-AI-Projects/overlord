@@ -14,11 +14,11 @@ graph TB
     end
 
     subgraph Storage["File-Based Storage (~/.local/share/overlord/)"]
-        JOBS[("jobs/*.json\nJob Definitions")]
-        LOG[("execution.log\nJSON-lines History")]
-        LOCKS[("locks/*\nExclusive Locks")]
-        MBOX[("mailboxes/consumer/\nMaildir Messages")]
-        SPOOLDIR[("spool/\nDelivery Queue")]
+        JOBS[("jobs/*.json<br/>Job Definitions")]
+        LOG[("execution.log<br/>JSON-lines History")]
+        LOCKS[("locks/*<br/>Exclusive Locks")]
+        MBOX[("mailboxes/consumer/<br/>Maildir Messages")]
+        SPOOLDIR[("spool/<br/>Delivery Queue")]
     end
 
     CLI[CLI Client] -->|MCP over HTTP| MCP
@@ -72,7 +72,7 @@ sequenceDiagram
     Producer->>Executor: exit 0 + JSON stdout
     Executor->>Spool: deliver {consumer, message}
     Executor-->>Executor: send SIGUSR1 to wake spool
-    Spool->>Maildir: move to mailboxes/<consumer>/new/
+    Spool->>Maildir: move to mailboxes/consumer/new/
     Note over Maildir: RFC 822 envelope + payload.json
     Executor->>Maildir: check unconsumed messages
     Maildir->>Consumer: messages passed via stdin
