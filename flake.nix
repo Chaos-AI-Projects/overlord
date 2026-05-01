@@ -86,6 +86,7 @@ PYEOF
       pkgs.matrix-commander # Matrix protocol CLI client
       pkgs.podman           # Podman CLI (talks to host socket)
       pkgs.tzdata           # IANA timezone database
+      pkgs.tini             # lightweight init for PID 1 zombie reaping
     ];
 
     binPath = lib.makeBinPath runtimePackages;
@@ -103,7 +104,7 @@ PYEOF
       overlord init
 
       # Start the scheduler daemon (uses same DEFAULT_DB_PATH)
-      exec overlord daemon $*
+      exec tini -- overlord daemon "$@"
     '';
 
     # --------------- container image ---------------
