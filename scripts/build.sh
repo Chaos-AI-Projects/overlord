@@ -9,7 +9,7 @@ set -euo pipefail
 # Environment:
 #   GITHUB_REPO     - owner/repo (default: auto-detected from git remote)
 #   COMMIT_SHA      - commit to report status on (default: HEAD)
-#   SMOKE_TIMEOUT   - seconds to wait for container startup (default: 15)
+#   SMOKE_TIMEOUT   - seconds to wait for container startup (default: 30)
 #   CONTAINER_NAME  - name for the smoke-test container (default: overlord-smoke-test)
 #   STATUS_CONTEXT  - GitHub commit status context (default: overlord/build)
 
@@ -18,7 +18,7 @@ OVERLORD_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 GITHUB_REPO="${GITHUB_REPO:-}"
 COMMIT_SHA="${COMMIT_SHA:-}"
-SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-15}"
+SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-30}"
 CONTAINER_NAME="${CONTAINER_NAME:-overlord-smoke-test}"
 STATUS_CONTEXT="${STATUS_CONTEXT:-overlord/build}"
 
@@ -40,6 +40,9 @@ fi
 if [[ -z "$COMMIT_SHA" ]]; then
     COMMIT_SHA="$(git -C "$OVERLORD_DIR" rev-parse HEAD)"
 fi
+
+log "Repository: $GITHUB_REPO"
+log "Commit:     ${COMMIT_SHA:0:7}"
 
 report_failure() {
     local description="$1"

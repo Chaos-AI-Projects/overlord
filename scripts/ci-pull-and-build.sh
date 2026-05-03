@@ -4,6 +4,9 @@ set -euo pipefail
 # Pull from GitHub and trigger a build if the master branch was updated.
 # Designed to be run on a schedule (e.g., cron or overlord job).
 #
+# Note: Expects a clean working tree. The fast-forward merge will fail
+# if there are uncommitted local changes.
+#
 # Usage: ./scripts/ci-pull-and-build.sh [--repo-dir PATH]
 #
 # Environment:
