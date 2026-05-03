@@ -84,7 +84,6 @@ podman rm -f "$CONTAINER_NAME" 2>/dev/null || true
 
 podman run --rm -d \
     --name "$CONTAINER_NAME" \
-    --network=host \
     --userns=keep-id:uid=1000,gid=1000 \
     overlord:latest
 
