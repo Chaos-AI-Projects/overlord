@@ -88,6 +88,7 @@ PYEOF
       pkgs.tzdata           # IANA timezone database
       pkgs.tini             # lightweight init for PID 1 zombie reaping
       pkgs.poppler-utils    # pdftotext, pdftoppm, pdfinfo
+      pkgs.chez             # Chez Scheme
     ];
 
     binPath = lib.makeBinPath runtimePackages;
