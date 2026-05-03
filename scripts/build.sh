@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build and smoke-test the overlord container image.
-# Reports to GitHub (as a commit status) only on failure.
+# Creates a GitHub issue on failure.
 #
 # Usage: ./scripts/build.sh [--repo OWNER/REPO] [--sha COMMIT_SHA]
 #
@@ -11,7 +11,6 @@ set -euo pipefail
 #   COMMIT_SHA      - commit to report status on (default: HEAD)
 #   SMOKE_TIMEOUT   - seconds to wait for container startup (default: 30)
 #   CONTAINER_NAME  - name for the smoke-test container (default: overlord-smoke-test)
-#   STATUS_CONTEXT  - GitHub commit status context (default: overlord/build)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OVERLORD_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -20,7 +19,6 @@ GITHUB_REPO="${GITHUB_REPO:-}"
 COMMIT_SHA="${COMMIT_SHA:-}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-30}"
 CONTAINER_NAME="${CONTAINER_NAME:-overlord-smoke-test}"
-STATUS_CONTEXT="${STATUS_CONTEXT:-overlord/build}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -47,11 +45,15 @@ log "Commit:     ${COMMIT_SHA:0:7}"
 report_failure() {
     local description="$1"
     log "Reporting failure to GitHub: $description"
-    gh api "repos/${GITHUB_REPO}/statuses/${COMMIT_SHA}" \
-        -f state=failure \
-        -f description="$description" \
-        -f context="$STATUS_CONTEXT" \
-        --silent || log "Warning: failed to report status to GitHub"
+    gh issue create \
+        --repo "$GITHUB_REPO" \
+        --title "overlord: build failure — $description" \
+        --body "Build failed at commit ${COMMIT_SHA:0:7} on $(date '+%Y-%m-%d %H:%M:%S').
+
+**Error:** $description
+
+**Triggered by:** \`ci-pull-and-build.sh\`" \
+        || log "Warning: failed to create GitHub issue"
 }
 
 cleanup() {
@@ -61,7 +63,8 @@ trap cleanup EXIT
 
 # --- Step 1: Build ---
 log "Building container image in $OVERLORD_DIR"
-if ! nix build "${OVERLORD_DIR}#container" --out-link "${OVERLORD_DIR}/result"; then
+cd "$OVERLORD_DIR"
+if ! nix --extra-experimental-features nix-command --extra-experimental-features flakes build .#container --out-link "${OVERLORD_DIR}/result"; then
     report_failure "nix build failed"
     exit 1
 fi
