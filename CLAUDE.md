@@ -48,7 +48,10 @@ overlord/
 │   ├── cron.py              # Cron expression parser
 │   ├── mcp_server.py        # MCP server for agent-driven job management
 │   ├── vault_template.py    # Template for `overlord init` vault scaffolding
-│   └── logging_config.py    # Logging setup
+│   ├── logging_config.py    # Logging setup
+│   └── scripts/
+│       ├── overlord_job.sh  # Consumer job script that invokes Claude
+│       └── presence.py      # Presence system helper (checkin/recent/prune/scan)
 ├── tests/                   # Test files
 ├── scripts/                 # Utility scripts (e.g., migration)
 ├── pyproject.toml           # Package metadata & dependencies
@@ -103,12 +106,26 @@ Concurrency is handled via `flock(2)` for job files and the ID counter, `O_CREAT
 - Exposes tools: register/unregister jobs, list jobs, trigger execution, query/send messages, shutdown daemon
 - CLI commands communicate with the daemon through MCP (avoids direct file access)
 
+### Presence System
+
+Gives jobs awareness of what other jobs have been doing recently. Uses the message hub with `consumer="presence"` as a passive data store.
+
+- **`presence.py checkin <description>`** — records a presence message with the job's execution ID, name, description, and timestamp
+- **`presence.py recent`** — returns the 5 most recent presence messages
+- **`presence.py prune`** — consumes (moves to processed) all but the 5 most recent messages
+- **`presence.py scan`** — returns all presence messages for evaluation
+- **`/mindful` skill** — calls checkin + recent; invoked at the start of every job (except `/self-monitor`)
+- **`/self-monitor` skill** — scans presence records, checks statuses of jobs that have checked in, and recovers failed tasks; triggered every 2 hours by `self-monitor-trigger`
+- Identity is read from `OVERLORD_EXECUTION_ID` and `OVERLORD_JOB_NAME` environment variables (set by the executor)
+
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `XDG_DATA_HOME` | `~/.local/share` | Data directory (state stored under `$XDG_DATA_HOME/overlord/`) |
 | `TZ` | `UTC` | Timezone for cron schedule evaluation and log/CLI timestamp display (e.g., `Australia/Sydney`) |
+| `OVERLORD_EXECUTION_ID` | *(set by executor)* | Unique execution ID for the current job run (passed to subprocesses) |
+| `OVERLORD_JOB_NAME` | *(set by executor)* | Name of the currently executing job (passed to subprocesses) |
 
 ## Container
 

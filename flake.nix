@@ -55,6 +55,10 @@ PYEOF
       (pkgs.python312.withPackages (ps: with ps; [
         pip
         pandas
+        feedparser
+        httpx
+        matplotlib
+        numpy
       ]))
       pkgs.bash
       pkgs.coreutils

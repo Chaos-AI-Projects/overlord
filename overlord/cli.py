@@ -393,6 +393,20 @@ def cmd_init(args: argparse.Namespace) -> None:
         created = job_store.create_job(job)
         print(f"Registered job 'overlord'")
 
+    # Register the self-monitor-trigger job
+    existing_trigger = job_store.get_job_by_name("self-monitor-trigger")
+    if existing_trigger:
+        print(f"Job 'self-monitor-trigger' already registered, skipping")
+    else:
+        trigger_job = Job(
+            name="self-monitor-trigger",
+            cron_expression="0 */2 * * *",
+            command='overlord send --consumer overlord --payload "please run self-monitor"',
+            timeout_seconds=30,
+        )
+        job_store.create_job(trigger_job)
+        print(f"Registered job 'self-monitor-trigger'")
+
     # Send an init-complete message to the overlord mailbox
     from . import maildir
     from . import spool

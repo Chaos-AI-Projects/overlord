@@ -119,10 +119,10 @@ class TestCmdInit:
         # Job registration should report already registered
         assert "already registered" in out
 
-        # Still only one job file
+        # Two job files: overlord + self-monitor-trigger
         jobs_dir = default_data_dir / "jobs"
         job_files = [f for f in jobs_dir.iterdir() if f.suffix == ".json"]
-        assert len(job_files) == 1
+        assert len(job_files) == 2
 
 
 class TestOriginDirectory:

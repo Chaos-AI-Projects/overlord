@@ -18,8 +18,15 @@ The following skills are installed in `.claude/commands/` and available as slash
 - `/update-job` — Modify parameters of an existing job (cron, command, timeout, etc.)
 - `/rotate-log` — Rotate the daemon log file (close and reopen the file handler)
 - `/merge-from-origin` — Merge upstream template changes from `origin/` into working copies
+- `/mindful` — Record your current task and see recent activity from other jobs
+- `/self-monitor` — Review recent job activity for unfinished tasks and prune old presence messages
 
 Use these skills for guided, interactive job management instead of running CLI commands manually.
+
+## Presence System
+
+Every job should invoke `/mindful` at the start of its task (except when the task is `/self-monitor` itself).
+This records what the job is working on and returns recent activity from other jobs, providing cross-job awareness.
 
 ## Job Output Format
 

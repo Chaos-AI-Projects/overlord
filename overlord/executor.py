@@ -7,6 +7,7 @@ retry logic, and message production.
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -116,12 +117,19 @@ async def _run_subprocess(
 
     stdin_mode = asyncio.subprocess.PIPE if input_messages else asyncio.subprocess.DEVNULL
 
+    # Expose execution identity to the subprocess so scripts like
+    # presence.py can identify themselves without extra arguments.
+    child_env = os.environ.copy()
+    child_env["OVERLORD_EXECUTION_ID"] = str(record.id)
+    child_env["OVERLORD_JOB_NAME"] = job.name
+
     proc = await asyncio.create_subprocess_shell(
         job.command,
         stdin=stdin_mode,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        env=child_env,
     )
 
     stdin_data = None
