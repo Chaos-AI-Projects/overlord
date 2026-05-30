@@ -3,7 +3,9 @@
 
 Sub-commands:
     checkin <description>  Record current job's presence (reads identity from env)
-    checkout               Clear presence for the current job (mark task finished)
+    checkout [--what-next <text>]
+                           Clear presence for the current job (mark task finished),
+                           optionally recording a follow-up note
     recent                 Return the 5 most recent presence messages
     prune                  Consume all but the 5 most recent presence messages
     scan                   Return all presence messages (for self-monitor)
@@ -70,21 +72,41 @@ def cmd_checkin(description: str) -> None:
     print(f"Checked in: execution={execution_id} job={job_name}", file=sys.stderr)
 
 
-def cmd_checkout() -> None:
-    """Record that the current job's task has finished."""
+def cmd_checkout(what_next: str = "") -> None:
+    """Record that the current job's task has finished.
+
+    Idempotent: if a checkout (finished) record already exists for this
+    task_id, this is a no-op so repeated invocations never write duplicate
+    records. An optional ``what_next`` note describing the follow-up is
+    included only when it is non-empty (after stripping whitespace).
+    """
     execution_id = os.environ.get("OVERLORD_EXECUTION_ID", "unknown")
     job_name = os.environ.get("OVERLORD_JOB_NAME", "unknown")
 
-    payload = json.dumps({
+    # Idempotency guard: skip if this task_id has already been checked out.
+    store = _get_store()
+    existing = _parse_payloads(store.fetch_messages(PRESENCE_CONSUMER))
+    if any(
+        isinstance(p, dict)
+        and p.get("status") == "finished"
+        and p.get("task_id") == execution_id
+        for p in existing
+    ):
+        print(f"Already checked out: execution={execution_id} job={job_name}", file=sys.stderr)
+        return
+
+    record = {
         "task_id": execution_id,
         "job_name": job_name,
         "status": "finished",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    if what_next.strip():
+        record["what_next"] = what_next.strip()
 
     spool = _get_spool()
     msg = MaildirStore.build_message(
-        payload=payload,
+        payload=json.dumps(record),
         consumer=PRESENCE_CONSUMER,
         job_name=job_name,
     )
@@ -180,7 +202,15 @@ def main() -> None:
             sys.exit(1)
         cmd_checkin(" ".join(sys.argv[2:]))
     elif command == "checkout":
-        cmd_checkout()
+        what_next = ""
+        args = sys.argv[2:]
+        if "--what-next" in args:
+            idx = args.index("--what-next")
+            if idx + 1 >= len(args):
+                print("Usage: presence.py checkout [--what-next <text>]", file=sys.stderr)
+                sys.exit(1)
+            what_next = args[idx + 1]
+        cmd_checkout(what_next=what_next)
     elif command == "recent":
         cmd_recent()
     elif command == "prune":

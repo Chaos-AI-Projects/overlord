@@ -16,6 +16,7 @@ from overlord.scripts.presence import (
     cmd_recent,
     cmd_scan,
     cmd_scan_unfinished,
+    main,
 )
 from overlord.spool import SpoolWriter
 
@@ -258,6 +259,83 @@ class TestCmdCheckout:
         assert payload["status"] == "finished"
         assert payload["task_id"] == "exec-42"
         assert payload["job_name"] == "test-job"
+
+    def test_includes_what_next_when_provided(self, data_dir, monkeypatch):
+        monkeypatch.setenv("OVERLORD_EXECUTION_ID", "exec-42")
+        monkeypatch.setenv("OVERLORD_JOB_NAME", "test-job")
+        cmd_checkout(what_next="follow up on the migration")
+
+        payload = self._parse_spool_payload(self._spool_eml_files(data_dir)[0])
+        assert payload["status"] == "finished"
+        assert payload["what_next"] == "follow up on the migration"
+
+    def test_omits_what_next_when_empty(self, data_dir, monkeypatch):
+        monkeypatch.setenv("OVERLORD_EXECUTION_ID", "exec-42")
+        monkeypatch.setenv("OVERLORD_JOB_NAME", "test-job")
+        cmd_checkout()
+
+        payload = self._parse_spool_payload(self._spool_eml_files(data_dir)[0])
+        assert "what_next" not in payload
+
+    def test_omits_what_next_when_whitespace(self, data_dir, monkeypatch):
+        monkeypatch.setenv("OVERLORD_EXECUTION_ID", "exec-42")
+        monkeypatch.setenv("OVERLORD_JOB_NAME", "test-job")
+        cmd_checkout(what_next="   ")
+
+        payload = self._parse_spool_payload(self._spool_eml_files(data_dir)[0])
+        assert "what_next" not in payload
+
+    def test_idempotent_when_already_finished(self, data_dir, store, monkeypatch):
+        # A checkout for this task_id has already been delivered.
+        _deliver_checkout(store, "test-job", "2026-01-01T00:00:00Z", task_id="exec-42")
+        monkeypatch.setenv("OVERLORD_EXECUTION_ID", "exec-42")
+        monkeypatch.setenv("OVERLORD_JOB_NAME", "test-job")
+
+        cmd_checkout()
+
+        # No new checkout should be written to the spool.
+        assert self._spool_eml_files(data_dir) == []
+
+    def test_writes_when_only_checkin_exists(self, data_dir, store, monkeypatch):
+        # An open checkin (no matching checkout) should not block checkout.
+        _deliver_presence(store, "test-job", "task", "2026-01-01T00:00:00Z", task_id="exec-42")
+        monkeypatch.setenv("OVERLORD_EXECUTION_ID", "exec-42")
+        monkeypatch.setenv("OVERLORD_JOB_NAME", "test-job")
+
+        cmd_checkout()
+
+        assert len(self._spool_eml_files(data_dir)) == 1
+
+    def test_idempotency_scoped_to_task_id(self, data_dir, store, monkeypatch):
+        # A checkout for a different task_id must not suppress this one.
+        _deliver_checkout(store, "test-job", "2026-01-01T00:00:00Z", task_id="exec-999")
+        monkeypatch.setenv("OVERLORD_EXECUTION_ID", "exec-42")
+        monkeypatch.setenv("OVERLORD_JOB_NAME", "test-job")
+
+        cmd_checkout()
+
+        assert len(self._spool_eml_files(data_dir)) == 1
+
+    def test_cli_passes_what_next(self, data_dir, monkeypatch):
+        monkeypatch.setenv("OVERLORD_EXECUTION_ID", "exec-42")
+        monkeypatch.setenv("OVERLORD_JOB_NAME", "test-job")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["presence.py", "checkout", "--what-next", "resume the backfill"],
+        )
+        main()
+
+        payload = self._parse_spool_payload(self._spool_eml_files(data_dir)[0])
+        assert payload["what_next"] == "resume the backfill"
+
+    def test_cli_missing_what_next_value_exits(self, data_dir, monkeypatch):
+        monkeypatch.setenv("OVERLORD_EXECUTION_ID", "exec-42")
+        monkeypatch.setenv("OVERLORD_JOB_NAME", "test-job")
+        monkeypatch.setattr("sys.argv", ["presence.py", "checkout", "--what-next"])
+
+        with pytest.raises(SystemExit) as excinfo:
+            main()
+        assert excinfo.value.code == 1
 
 
 class TestCmdScanUnfinished:
