@@ -7,11 +7,13 @@ import pytest
 
 from overlord.maildir import MaildirStore
 from overlord.scripts.presence import (
+    OVERLORD_CONSUMER,
     PRESENCE_CONSUMER,
     _parse_payloads,
     _sorted_messages,
     cmd_checkin,
     cmd_checkout,
+    cmd_dispatch_whatnext,
     cmd_prune,
     cmd_recent,
     cmd_scan,
@@ -53,12 +55,30 @@ def _deliver_presence(store, job_name, description, timestamp, task_id=None):
     store.deliver(msg, consumer=PRESENCE_CONSUMER)
 
 
-def _deliver_checkout(store, job_name, timestamp, task_id=None):
+def _deliver_checkout(store, job_name, timestamp, task_id=None, what_next=None):
     """Deliver a checkout (finished) message directly to the maildir."""
-    payload = json.dumps({
+    record = {
         "task_id": task_id or f"exec-{job_name}",
         "job_name": job_name,
         "status": "finished",
+        "timestamp": timestamp,
+    }
+    if what_next is not None:
+        record["what_next"] = what_next
+    msg = MaildirStore.build_message(
+        payload=json.dumps(record),
+        consumer=PRESENCE_CONSUMER,
+        job_name=job_name,
+    )
+    store.deliver(msg, consumer=PRESENCE_CONSUMER)
+
+
+def _deliver_dispatched(store, job_name, timestamp, task_id):
+    """Deliver a 'dispatched' marker message directly to the maildir."""
+    payload = json.dumps({
+        "task_id": task_id,
+        "job_name": job_name,
+        "status": "dispatched",
         "timestamp": timestamp,
     })
     msg = MaildirStore.build_message(
@@ -375,3 +395,160 @@ class TestCmdScanUnfinished:
         output = json.loads(capsys.readouterr().out)
         assert len(output) == 1
         assert output[0]["task_id"] == "exec-1"
+
+    def test_ignores_dispatched_marker_without_finished_record(self, data_dir, store, capsys):
+        # If prune has evicted the original finished record but kept the
+        # dispatched marker, the marker must not be reported as an unfinished
+        # checkin (it has status="dispatched" and no description).
+        _deliver_dispatched(store, "job-a", "2026-01-01T02:00:00Z", task_id="exec-1")
+
+        cmd_scan_unfinished()
+        output = json.loads(capsys.readouterr().out)
+        assert output == []
+
+
+class TestCmdDispatchWhatNext:
+    @staticmethod
+    def _spool_payloads(data_dir):
+        """Return (consumer, payload-dict) tuples for every spool .eml file."""
+        from email import policy
+        from email.parser import BytesParser
+
+        results = []
+        for eml in (data_dir / "spool").glob("*.eml"):
+            msg = BytesParser(policy=policy.default).parsebytes(eml.read_bytes())
+            consumer = msg.get("X-Overlord-Consumer")
+            payload = None
+            for part in msg.walk():
+                if part.get_filename() == "payload.json":
+                    payload = json.loads(part.get_content())
+            results.append((consumer, payload))
+        return results
+
+    def _overlord_dispatches(self, data_dir):
+        return [p for c, p in self._spool_payloads(data_dir) if c == OVERLORD_CONSUMER]
+
+    def _dispatched_markers(self, data_dir):
+        return [
+            p for c, p in self._spool_payloads(data_dir)
+            if c == PRESENCE_CONSUMER and p.get("status") == "dispatched"
+        ]
+
+    def test_dispatches_whatnext_to_overlord(self, data_dir, store):
+        _deliver_checkout(
+            store, "job-a", "2026-01-01T00:00:00Z",
+            task_id="exec-1", what_next="resume the backfill",
+        )
+
+        cmd_dispatch_whatnext()
+
+        dispatches = self._overlord_dispatches(data_dir)
+        assert len(dispatches) == 1
+        assert dispatches[0]["what_next"] == "resume the backfill"
+        assert dispatches[0]["origin_task_id"] == "exec-1"
+
+    def test_skips_finished_without_whatnext(self, data_dir, store):
+        _deliver_checkout(store, "job-a", "2026-01-01T00:00:00Z", task_id="exec-1")
+
+        cmd_dispatch_whatnext()
+
+        assert self._overlord_dispatches(data_dir) == []
+
+    def test_ignores_open_checkins(self, data_dir, store):
+        # A checkin (not finished) is never a dispatch candidate, even though
+        # it carries a description.
+        _deliver_presence(store, "job-a", "still working", "2026-01-01T00:00:00Z", task_id="exec-1")
+
+        cmd_dispatch_whatnext()
+
+        assert self._overlord_dispatches(data_dir) == []
+
+    def test_bound_caps_dispatches(self, data_dir, store):
+        for i in range(8):
+            _deliver_checkout(
+                store, f"job-{i}", f"2026-01-0{i+1}T00:00:00Z",
+                task_id=f"exec-{i}", what_next=f"follow up {i}",
+            )
+
+        cmd_dispatch_whatnext(max_dispatch=5)
+
+        assert len(self._overlord_dispatches(data_dir)) == 5
+
+    def test_dedup_collapses_identical_strings(self, data_dir, store):
+        _deliver_checkout(
+            store, "job-a", "2026-01-01T00:00:00Z",
+            task_id="exec-1", what_next="do the thing",
+        )
+        _deliver_checkout(
+            store, "job-b", "2026-01-02T00:00:00Z",
+            task_id="exec-2", what_next="do the thing",
+        )
+
+        cmd_dispatch_whatnext()
+
+        # Only one overlord dispatch for the identical string ...
+        dispatches = self._overlord_dispatches(data_dir)
+        assert len(dispatches) == 1
+        # ... but both originating task_ids are stamped so neither resurfaces.
+        marker_ids = {m["task_id"] for m in self._dispatched_markers(data_dir)}
+        assert marker_ids == {"exec-1", "exec-2"}
+
+    def test_idempotent_skips_already_dispatched(self, data_dir, store):
+        _deliver_checkout(
+            store, "job-a", "2026-01-01T00:00:00Z",
+            task_id="exec-1", what_next="already sent",
+        )
+        _deliver_dispatched(store, "job-a", "2026-01-01T00:05:00Z", task_id="exec-1")
+
+        cmd_dispatch_whatnext()
+
+        assert self._overlord_dispatches(data_dir) == []
+
+    def test_stamps_dispatched_marker(self, data_dir, store):
+        _deliver_checkout(
+            store, "job-a", "2026-01-01T00:00:00Z",
+            task_id="exec-1", what_next="resume the backfill",
+        )
+
+        cmd_dispatch_whatnext()
+
+        markers = self._dispatched_markers(data_dir)
+        assert len(markers) == 1
+        assert markers[0]["task_id"] == "exec-1"
+
+    def test_cli_dispatch_whatnext(self, data_dir, store, monkeypatch):
+        _deliver_checkout(
+            store, "job-a", "2026-01-01T00:00:00Z",
+            task_id="exec-1", what_next="resume the backfill",
+        )
+        monkeypatch.setattr("sys.argv", ["presence.py", "dispatch-whatnext"])
+
+        main()
+
+        assert len(self._overlord_dispatches(data_dir)) == 1
+
+    def test_cli_dispatch_whatnext_max(self, data_dir, store, monkeypatch):
+        for i in range(4):
+            _deliver_checkout(
+                store, f"job-{i}", f"2026-01-0{i+1}T00:00:00Z",
+                task_id=f"exec-{i}", what_next=f"follow up {i}",
+            )
+        monkeypatch.setattr("sys.argv", ["presence.py", "dispatch-whatnext", "--max", "2"])
+
+        main()
+
+        assert len(self._overlord_dispatches(data_dir)) == 2
+
+    def test_cli_dispatch_whatnext_max_zero_rejected(self, data_dir, store, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["presence.py", "dispatch-whatnext", "--max", "0"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    def test_cli_dispatch_whatnext_max_negative_rejected(self, data_dir, store, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["presence.py", "dispatch-whatnext", "--max", "-1"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
