@@ -2,19 +2,21 @@
 description: Check job statuses and recover failed tasks
 ---
 
-Health check of jobs that have checked in via the presence system. Only inspects jobs with presence records — not all registered jobs.
+Health check of jobs that have checked in via the presence system. Focuses on **unfinished tasks** — jobs that checked in but never checked out.
 
 ## Steps
 
-1. **Scan presence** — get all presence records to find jobs that have checked in:
+1. **Scan unfinished tasks** — get only presence records without a matching checkout:
 
 ```bash
-python -m overlord.scripts.presence scan
+python -m overlord.scripts.presence scan-unfinished
 ```
 
-   Extract the unique `job_name` values from the returned JSON. These are the jobs to check.
+   This returns checkin records where the task never called `checkout`. Extract the unique `job_name` values — these are the jobs that may need attention.
 
-2. **Check each present job** — for every unique job name from the scan, inspect its recent execution history:
+   If the list is empty, all recent tasks completed successfully. Skip to step 4.
+
+2. **Check each unfinished job** — for every unique job name from the scan, inspect its recent execution history:
 
 ```bash
 overlord status <job-name>
@@ -22,6 +24,7 @@ overlord status <job-name>
 
    Look at the `status` and `exit_code` of recent executions. A job needs attention if:
    - Its most recent execution has `status: failed` or a non-zero `exit_code`
+   - It has `status: running` for an unusually long time (possible hang)
    - It has never executed despite being enabled
 
 3. **Recover failed tasks** — for each job that has failed recently:
@@ -50,11 +53,27 @@ overlord status <job-name>
    overlord send --consumer overlord --payload "Job '<job-name>' failed — <summary of root cause and what was attempted>. Needs human intervention."
    ```
 
-4. **Report** — summarize your findings:
-   - List jobs that are healthy (recent execution succeeded)
+4. **Dispatch what's-next follow-ups** — forward any `--what-next` notes left on finished records to the `overlord` consumer so they are picked up by the next run:
+
+```bash
+python -m overlord.scripts.presence dispatch-whatnext
+```
+
+   This must run **before** the prune step (step 5): prune deletes finished records, and the `what_next` notes live on those records — pruning first would lose the follow-ups. Dispatch is bounded, deduplicated, and idempotent (each task_id is marked `dispatched` so a note is forwarded at most once), so it is safe to run on every cycle.
+
+5. **Prune old presence records** — clean up finished records:
+
+```bash
+python -m overlord.scripts.presence prune
+```
+
+6. **Report** — summarize your findings:
+   - Total tasks scanned vs. unfinished count
    - List jobs whose failed tasks you investigated and completed
    - List jobs where you fixed the underlying issue (with details of the fix)
    - List jobs that need human attention (with root cause analysis)
+   - Number of what's-next follow-ups dispatched (if any)
+   - If no unfinished tasks: report "All recent tasks completed successfully"
 
 ## Important
 
