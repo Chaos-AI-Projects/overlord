@@ -119,10 +119,12 @@ class TestCmdInit:
         # Job registration should report already registered
         assert "already registered" in out
 
-        # Two job files: overlord + self-monitor-trigger
+        # Only the overlord job is seeded; self-monitor is driven by a
+        # scheduled prompt, not a seeded daemon job.
         jobs_dir = default_data_dir / "jobs"
         job_files = [f for f in jobs_dir.iterdir() if f.suffix == ".json"]
-        assert len(job_files) == 2
+        assert len(job_files) == 1
+        assert not (jobs_dir / "self-monitor-trigger.json").exists()
 
 
 class TestOriginDirectory:

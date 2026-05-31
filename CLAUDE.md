@@ -115,7 +115,7 @@ Gives jobs awareness of what other jobs have been doing recently. Uses the messa
 - **`presence.py prune`** — consumes (moves to processed) all but the 5 most recent messages
 - **`presence.py scan`** — returns all presence messages for evaluation
 - **`/mindful` skill** — calls checkin + recent; invoked at the start of every job (except `/self-monitor`)
-- **`/self-monitor` skill** — scans presence records, checks statuses of jobs that have checked in, and recovers failed tasks; triggered every 2 hours by `self-monitor-trigger`
+- **`/self-monitor` skill** — scans presence records, checks statuses of jobs that have checked in, and recovers failed tasks; driven by the `self-monitor-trigger` scheduled prompt (in `scheduled-prompts.json`), which sends "please run self-monitor" to the overlord consumer
 - Identity is read from `OVERLORD_EXECUTION_ID` and `OVERLORD_JOB_NAME` environment variables (set by the executor)
 
 ## Environment Variables
