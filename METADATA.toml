@@ -1,0 +1,10 @@
+[project]
+name = "overlord"
+
+[[actions]]
+name = "build"
+command = "overlord/scripts/build.sh"
+
+[[actions]]
+name = "copybara-sync"
+command = "scripts/copybara-sync.sh overlord"

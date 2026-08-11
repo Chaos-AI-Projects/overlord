@@ -50,4 +50,4 @@ log "Updated: ${OLD_HEAD:0:7} -> ${NEW_HEAD:0:7}"
 
 # Trigger the build
 log "Master updated, starting build..."
-exec "$SCRIPT_DIR/build.sh" --sha "$NEW_HEAD"
+exec "$SCRIPT_DIR/build.sh" --sha "$NEW_HEAD" --triggered-by "ci-pull-and-build.sh"
