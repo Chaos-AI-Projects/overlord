@@ -2,7 +2,7 @@
   description = "Overlord — container & package";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     gws-cli.url = "github:googleworkspace/cli/v0.22.5";
   };
