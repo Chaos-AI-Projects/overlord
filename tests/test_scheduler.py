@@ -2,6 +2,10 @@
 
 import asyncio
 import json
+import logging
+import signal
+import socket
+import time
 
 import pytest
 
@@ -17,6 +21,39 @@ from overlord.scheduler import Scheduler
 def scheduler(tmp_path):
     s = Scheduler(data_dir=tmp_path, tick_seconds=1)
     return s
+
+
+def _free_port() -> int:
+    """Return a port that is free right now, for uvicorn to bind."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+async def _wait_until_listening(host: str, port: int, timeout: float = 10.0) -> None:
+    """Block until something accepts connections on host:port."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            _, writer = await asyncio.open_connection(host, port)
+        except OSError:
+            await asyncio.sleep(0.05)
+            continue
+        writer.close()
+        await writer.wait_closed()
+        return
+    raise AssertionError(f"nothing listening on {host}:{port} after {timeout}s")
+
+
+class _CollectingHandler(logging.Handler):
+    """Capture records straight off a logger, ignoring propagation rules."""
+
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
 
 
 class TestScheduler:
@@ -253,6 +290,75 @@ class TestSchedulerWithMcp:
 
         assert s._mcp_server is not None
         assert s._mcp_server.name == "overlord-job-registry"
+
+    @pytest.mark.asyncio
+    async def test_mcp_shutdown_leaves_no_lifespan_error(self, tmp_path):
+        """Stopping the daemon must not make uvicorn log a lifespan traceback.
+
+        MS-180: shutdown cancelled the MCP task outright, which left uvicorn's
+        own `LifespanOn.main()` task pending. `asyncio.run()` cancels that task
+        when it closes the loop, the CancelledError lands inside starlette's
+        lifespan `receive()`, and uvicorn logs it as an error. That is why the
+        traceback appeared after "Shutdown complete" rather than before it.
+
+        The loop teardown is what this test stands in for: it cancels whatever
+        the scheduler left behind, exactly as `asyncio.run()` would.
+        """
+        port = _free_port()
+        s = Scheduler(
+            data_dir=tmp_path,
+            tick_seconds=1,
+            mcp_host="127.0.0.1",
+            mcp_port=port,
+        )
+
+        run_task = asyncio.create_task(s.run())
+        try:
+            await _wait_until_listening("127.0.0.1", port)
+        except AssertionError:
+            run_task.cancel()
+            raise
+
+        # Attach only once uvicorn is up: constructing uvicorn.Config runs
+        # dictConfig, which would drop a handler added any earlier.
+        handler = _CollectingHandler()
+        uvicorn_error = logging.getLogger("uvicorn.error")
+        uvicorn_error.addHandler(handler)
+        try:
+            await s.stop()
+            await asyncio.wait_for(run_task, timeout=30)
+
+            leftover = [
+                t for t in asyncio.all_tasks() if t is not asyncio.current_task()
+            ]
+            for task in leftover:
+                task.cancel()
+            await asyncio.gather(*leftover, return_exceptions=True)
+            await asyncio.sleep(0.2)
+        finally:
+            uvicorn_error.removeHandler(handler)
+
+        errors = [r for r in handler.records if r.levelno >= logging.ERROR]
+        assert not errors, "uvicorn logged on shutdown: " + "; ".join(
+            r.getMessage() for r in errors
+        )
+
+    @pytest.mark.asyncio
+    async def test_repeated_signal_logs_one_shutdown(self, scheduler, caplog):
+        """A second signal must not announce a second shutdown.
+
+        Uvicorn's `capture_signals` re-raises the signal it swallowed once
+        serve() returns, so a clean MCP shutdown delivers SIGTERM back to us
+        after the scheduler has already finished stopping.
+        """
+        with caplog.at_level(logging.INFO, logger="overlord.scheduler"):
+            scheduler._on_signal(signal.SIGTERM)
+            scheduler._on_signal(signal.SIGTERM)
+
+        announced = [
+            r for r in caplog.records if "initiating shutdown" in r.getMessage()
+        ]
+        assert len(announced) == 1
 
     @pytest.mark.asyncio
     async def test_no_mcp_by_default(self, scheduler):

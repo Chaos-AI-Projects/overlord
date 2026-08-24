@@ -71,6 +71,7 @@ class Scheduler:
         self._cwd = Path.cwd()
         self._mcp_server = None
         self._mcp_task: Optional[asyncio.Task] = None
+        self._uvicorn_server = None
         if mcp_host is not None:
             self._mcp_server = create_mcp_server(
                 data_dir=self._data_dir, host=mcp_host, port=mcp_port,
@@ -150,9 +151,28 @@ class Scheduler:
     # -- internals --
 
     async def _run_mcp_server(self) -> None:
-        """Run the MCP streamable-HTTP server."""
+        """Run the MCP streamable-HTTP server.
+
+        This inlines ``FastMCP.run_streamable_http_async()`` so that the
+        ``uvicorn.Server`` is reachable from ``_shutdown``. Uvicorn's only
+        graceful stop is ``should_exit``; cancelling ``serve()`` instead leaves
+        its lifespan task pending, and that task logs a CancelledError
+        traceback when the loop is closed (MS-180).
+        """
+        import uvicorn
+
+        config = uvicorn.Config(
+            self._mcp_server.streamable_http_app(),
+            host=self._mcp_server.settings.host,
+            port=self._mcp_server.settings.port,
+            log_level=self._mcp_server.settings.log_level.lower(),
+            # Streamable-HTTP clients hold connections open, so an unbounded
+            # graceful wait would stall the daemon's exit behind an idle client.
+            timeout_graceful_shutdown=5,
+        )
+        self._uvicorn_server = uvicorn.Server(config)
         try:
-            await self._mcp_server.run_streamable_http_async()
+            await self._uvicorn_server.serve()
         except asyncio.CancelledError:
             pass
 
@@ -162,6 +182,10 @@ class Scheduler:
             loop.add_signal_handler(sig, self._on_signal, sig)
 
     def _on_signal(self, sig: signal.Signals) -> None:
+        if self._stop_event.is_set():
+            # Uvicorn re-raises the signal it captured once serve() returns,
+            # which would otherwise log a second shutdown after the first.
+            return
         logger.info("Received %s, initiating shutdown", sig.name)
         self._stop_event.set()
 
@@ -393,14 +417,20 @@ class Scheduler:
                 pass
             logger.info("Spool processor stopped")
 
-        # Stop the MCP server.
-        # Grace delay lets the in-flight shutdown response complete before
-        # we cancel the task, avoiding noisy CancelledError tracebacks (#167).
+        # Stop the MCP server. `should_exit` is uvicorn's graceful stop: it
+        # finishes the in-flight shutdown response, closes its own lifespan and
+        # returns from serve(). Cancelling serve() instead skipped that lifespan
+        # and printed a traceback at loop close (MS-180); it also needed a sleep
+        # to protect the in-flight response, which this no longer does (#167).
+        # wait_for cancels the task if uvicorn overruns its own grace window.
         if self._mcp_task is not None and not self._mcp_task.done():
-            await asyncio.sleep(0.5)
-            self._mcp_task.cancel()
+            if self._uvicorn_server is not None:
+                self._uvicorn_server.should_exit = True
+            else:
+                # serve() was never reached, so there is nothing to ask nicely.
+                self._mcp_task.cancel()
             try:
-                await asyncio.wait_for(self._mcp_task, timeout=5)
+                await asyncio.wait_for(self._mcp_task, timeout=10)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
             logger.info("MCP server stopped")
