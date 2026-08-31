@@ -91,6 +91,41 @@ Repeatable tasks manager for AI agents. Provides cron-based job scheduling, mess
       |                  |                |                |   on success     |
 ```
 
+## Project Structure
+
+```
+overlord/
+├── overlord/                        # Main package
+│   ├── cli.py                       # CLI entry point (argparse)
+│   ├── scheduler.py                 # Cron-based async scheduler with graceful shutdown
+│   ├── executor.py                  # Job execution with locking & retries
+│   ├── job_store.py                 # JSON file-based job storage (one file per job)
+│   ├── execution_log.py             # JSON-lines append-only execution history
+│   ├── lock_store.py                # File-based named locks (O_CREAT|O_EXCL)
+│   ├── maildir.py                   # Maildir-backed message delivery
+│   ├── spool.py                     # Async spool for message delivery to Maildir
+│   ├── models.py                    # Data models (Job, ExecutionRecord, Lock, JobOutput)
+│   ├── cron.py                      # Cron expression parser
+│   ├── mcp_server.py                # MCP server for agent-driven job management
+│   ├── vault_template.py            # Template for `overlord init` vault scaffolding
+│   ├── logging_config.py            # Logging setup
+│   ├── templates/                   # Files `overlord init` writes into a new vault
+│   │   ├── skills/                  # Skill definitions for the vault's agent
+│   │   └── vault_claude_md.md       # Template for the vault's own agent instructions
+│   └── scripts/
+│       ├── overlord_job.sh          # Consumer job script that invokes Claude
+│       ├── presence.py              # Presence system helper (checkin/recent/prune/scan)
+│       └── migrate_sqlite_to_json.py # Legacy SQLite -> JSON migration
+├── tests/                           # Test suite
+├── scripts/                         # Host-side operational scripts
+│   ├── run-overlord.sh              # Production runner with image auto-rollback
+│   ├── build.sh                     # Image build
+│   └── ci-pull-and-build.sh         # CI pull-and-build
+├── flake.nix / flake.lock           # Nix package and container definitions
+├── pyproject.toml                   # Package metadata & dependencies
+└── LICENSE
+```
+
 ## Installation
 
 ```bash
@@ -212,6 +247,23 @@ Successful jobs (exit 0) must emit JSON on stdout:
 
 If stdout is empty or not valid JSON, the execution is marked as failed.
 
+## Presence System
+
+Gives jobs awareness of what other jobs have been doing recently. It reuses the message hub as a passive data store, writing to the `presence` consumer rather than to a job that ever runs.
+
+The helper ships as `overlord/scripts/presence.py`:
+
+| Command | Effect |
+|---------|--------|
+| `presence.py checkin <description>` | Records the job's execution ID, name, description and timestamp |
+| `presence.py recent` | Returns the 5 most recent presence records |
+| `presence.py prune` | Consumes all but the 5 most recent records |
+| `presence.py scan` | Returns every presence record, for evaluation |
+
+Identity comes from the `OVERLORD_EXECUTION_ID` and `OVERLORD_JOB_NAME` environment variables, which the executor sets on every job subprocess. A check-in is written to the spool and delivered asynchronously, so a job does not see its own record in `recent`.
+
+Two skills scaffolded by `overlord init` build on it. `/mindful` calls checkin and recent, so a job records what it is doing and receives cross-job context. `/self-monitor` scans the records, checks the status of jobs that checked in, and recovers failed tasks.
+
 ## Storage Layout
 
 All state lives under `$XDG_DATA_HOME/overlord/` (default: `~/.local/share/overlord/`):
@@ -243,6 +295,8 @@ Concurrency safety:
 |----------|---------|-------------|
 | `XDG_DATA_HOME` | `~/.local/share` | Data directory (state stored under `$XDG_DATA_HOME/overlord/`) |
 | `TZ` | `UTC` | Timezone for cron evaluation and timestamp display |
+| `OVERLORD_EXECUTION_ID` | *(set by executor)* | Unique execution ID for the current job run, passed to subprocesses |
+| `OVERLORD_JOB_NAME` | *(set by executor)* | Name of the currently executing job, passed to subprocesses |
 
 ## Container
 
@@ -297,6 +351,33 @@ Replace `podman` with `docker` if using Docker. The container:
 - Mounts the host's podman socket so `podman-remote` can manage containers from inside
 - Includes `podman`, `python3` (with pip/venv/pandas), `matrix-commander`, and other tools
 - Timezone symlinks are baked into the image at build time (no runtime setup needed)
+
+### Run with Auto-Rollback
+
+For production deployments, `scripts/run-overlord.sh` wraps the container with automatic image rollback:
+
+```bash
+# Start with defaults
+./scripts/run-overlord.sh
+
+# Override settings via environment
+DATA_DIR=~/my-overlord TZ=UTC GRACE_PERIOD=600 ./scripts/run-overlord.sh
+```
+
+The script always tries `overlord:latest` first. If the container exits inside the grace period, the script falls back to the last known-good image recorded in the image-state file. If `:latest` survives the grace period, it is promoted to known-good.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LATEST_IMAGE` | `overlord:latest` | Candidate image to try first |
+| `DATA_DIR` | `~/thebot` | Host directory mounted at `/home/overlord` |
+| `TZ` | `Australia/Sydney` | Container timezone |
+| `GRACE_PERIOD` | `300` | Seconds before an image is considered good |
+| `RESTART_DELAY` | `60` | Seconds to wait before restarting |
+| `CONTAINER_NAME` | `overlord` | Podman container name |
+| `IMAGE_STATE_FILE` | `~/.config/overlord/image-state` | Path to the known-good image state file |
+| `PODMAN_SOCKET` | `/run/user/$(id -u)/podman/podman.sock` | Host podman socket path |
+
+The runner uses host networking, mounts the podman socket, and stops the container gracefully on SIGTERM or SIGINT. It judges success by runtime duration alone and never inspects the exit code.
 
 ### Build Just the Python Package
 
