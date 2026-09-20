@@ -349,7 +349,7 @@ Replace `podman` with `docker` if using Docker. The container:
 - UID mapping is handled by podman (`--userns=keep-id`) rather than inside the container
 - Passes any extra arguments to `overlord daemon` (e.g., `--tick 30`)
 - Mounts the host's podman socket so `podman-remote` can manage containers from inside
-- Includes `podman`, `python3` (with pip/venv/pandas), `matrix-commander`, and other tools
+- Includes `podman`, `python3` (with pip/venv/pandas), `matrix-commander`, `signal-cli`, and other tools
 - Timezone symlinks are baked into the image at build time (no runtime setup needed)
 
 ### Run with Auto-Rollback

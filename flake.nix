@@ -88,6 +88,7 @@ PYEOF
       pkgs.iproute2         # ss, ip (network diagnostics)
       pkgs.lsof             # file diagnostics
       pkgs.matrix-commander # Matrix protocol CLI client
+      pkgs.signal-cli       # Signal protocol CLI client (bundles its own JRE)
       pkgs.podman           # Podman CLI (talks to host socket)
       pkgs.tzdata           # IANA timezone database
       pkgs.tini             # lightweight init for PID 1 zombie reaping
