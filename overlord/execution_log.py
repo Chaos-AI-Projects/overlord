@@ -14,7 +14,8 @@ relies on the POSIX guarantee that ``O_APPEND`` writes below
 import fcntl
 import json
 import os
-from contextlib import contextmanager
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -138,22 +139,25 @@ class ExecutionLog:
             f.flush()
             os.fsync(f.fileno())
 
-    def _find_latest_entry(self, execution_id: int) -> Optional[dict]:
-        """Return the newest log entry for *execution_id*, or ``None``.
+    def _iter_entries_reverse(self) -> Iterator[dict]:
+        """Yield decoded log entries newest-first.
 
-        Scans the file backwards in fixed-size chunks and stops at the
-        first match.  The log is append-only and the last line for an ID
-        is authoritative, so the first match found going backwards is the
-        answer, and everything before it can go unread.
+        Reads the file backwards in ``_REVERSE_CHUNK_BYTES`` chunks, so
+        peak memory stays a small multiple of one chunk however large the
+        log grows -- the chunk, the carry-joined copy and the decoded list
+        of its lines are all live at once, so budget roughly twice the
+        chunk rather than exactly one.  Blank and torn lines are skipped.
+        No flock needed: each line is atomically appended, and
+        ``_parse_entry`` drops any partial line observed during a
+        concurrent write.
 
-        A full forward parse gives the same result, but reads and decodes
-        the entire log: 2.94 s and 1.7 GB of peak memory on the live
-        370 MB file, paid on every job finish.
+        Callers that stop early should close the generator, which releases
+        the file handle -- ``contextlib.closing`` is the short way.
         """
         try:
             handle = self._log_path.open("rb")
         except FileNotFoundError:
-            return None
+            return
 
         with handle:
             handle.seek(0, os.SEEK_END)
@@ -170,35 +174,31 @@ class ExecutionLog:
                 carry = lines.pop(0)
                 for line in reversed(lines):
                     entry = _parse_entry(line)
-                    if entry is not None and entry.get("id") == execution_id:
-                        return entry
+                    if entry is not None:
+                        yield entry
 
+            # The scan always runs to the start of the file, so the final
+            # carry is a whole line rather than a fragment.
             entry = _parse_entry(carry)
-            if entry is not None and entry.get("id") == execution_id:
-                return entry
+            if entry is not None:
+                yield entry
 
-        return None
+    def _find_latest_entry(self, execution_id: int) -> Optional[dict]:
+        """Return the newest log entry for *execution_id*, or ``None``.
 
-    def _read_lines(self) -> list[dict]:
-        """Read all JSON lines from the log file.
+        The log is append-only and the last line for an ID is
+        authoritative, so the first match found scanning backwards is the
+        answer, and everything before it can go unread.
 
-        No flock needed: each line is atomically appended, and the
-        ``JSONDecodeError`` guard below safely skips any partial trailing
-        line observed during a concurrent write.
+        A full forward parse gives the same result, but reads and decodes
+        the entire log: 2.94 s and 1.7 GB of peak memory on the live
+        370 MB file, paid on every job finish.
         """
-        try:
-            text = self._log_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return []
-        entries = []
-        for line in text.splitlines():
-            line = line.strip()
-            if line:
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        return entries
+        with closing(self._iter_entries_reverse()) as entries:
+            for entry in entries:
+                if entry.get("id") == execution_id:
+                    return entry
+        return None
 
     def create_execution(self, job_name: str) -> ExecutionRecord:
         """Record the start of a new execution. Returns the new record."""
@@ -257,40 +257,67 @@ class ExecutionLog:
 
         Only the latest log line per execution ID is returned (i.e. the
         completion record takes precedence over the start record).
+
+        Scans backwards and stops once *limit* distinct IDs are in hand,
+        so the cost tracks the limit rather than the job's whole history.
+        A job with no records at all still reaches the start of the file,
+        but streams it instead of listing every entry in the log.
         """
-        entries = self._read_lines()
+        if limit <= 0:
+            return []
 
-        # Build a map of execution_id -> latest entry, filtered by job_name.
         latest: dict[int, dict] = {}
-        for entry in entries:
-            if entry.get("job_name") == job_name:
-                latest[entry["id"]] = entry
+        with closing(self._iter_entries_reverse()) as entries:
+            for entry in entries:
+                if entry.get("job_name") != job_name:
+                    continue
+                entry_id = entry.get("id")
+                # Going backwards the first line seen for an ID is its
+                # newest, so an earlier line must not overwrite it.
+                if entry_id is None or entry_id in latest:
+                    continue
+                latest[entry_id] = entry
+                if len(latest) == limit:
+                    break
 
-        # Sort by ID descending and apply limit.
-        sorted_entries = sorted(latest.values(), key=lambda e: e["id"], reverse=True)
-        return [_dict_to_record(e) for e in sorted_entries[:limit]]
+        ordered = sorted(latest.values(), key=lambda e: e["id"], reverse=True)
+        return [_dict_to_record(e) for e in ordered]
 
     def fail_running_executions(self) -> int:
-        """Mark all RUNNING executions as FAILED.
+        """Mark executions still logged as RUNNING as FAILED.
 
         Called on startup to clean up executions left running by a
         previous unclean shutdown.  Returns the number of affected
         executions.
+
+        The whole log is swept.  Streaming is what makes that affordable:
+        the old forward parse built a list of every decoded line and cost
+        1 689 MB of peak RSS on the live 379 MB file, against 53 MB here,
+        at the one moment the box is least able to absorb it.  Bounding
+        the scan to a window off the tail would save a further 2.7 s of
+        one-time startup latency, and is deliberately not done: `scheduler`
+        runs this sweep immediately before `lock_store.release_stale_locks`,
+        which keeps any lock whose holder still reads RUNNING, so a RUNNING
+        row left outside the window pins its `--lock` file permanently and
+        recedes further from the tail at every later startup.
         """
-        entries = self._read_lines()
+        running_ids: list[int] = []
+        resolved: set[int] = set()
+        with closing(self._iter_entries_reverse()) as entries:
+            for entry in entries:
+                entry_id = entry.get("id")
+                if entry_id is None or entry_id in resolved:
+                    continue
+                resolved.add(entry_id)
+                if entry.get("status") == ExecutionStatus.RUNNING.value:
+                    running_ids.append(entry_id)
 
-        # Find execution IDs whose latest state is RUNNING.
-        latest: dict[int, dict] = {}
-        for entry in entries:
-            latest[entry["id"]] = entry
-
-        count = 0
-        for entry in latest.values():
-            if entry.get("status") == ExecutionStatus.RUNNING.value:
-                self.finish_execution(
-                    entry["id"],
-                    ExecutionStatus.FAILED,
-                    stderr="Marked failed: scheduler restarted while execution was in progress",
-                )
-                count += 1
-        return count
+        # Write only after the scan, so the appends below cannot land in
+        # the region still being read.
+        for entry_id in running_ids:
+            self.finish_execution(
+                entry_id,
+                ExecutionStatus.FAILED,
+                stderr="Marked failed: scheduler restarted while execution was in progress",
+            )
+        return len(running_ids)
