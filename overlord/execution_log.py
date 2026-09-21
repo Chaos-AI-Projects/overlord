@@ -143,10 +143,15 @@ class ExecutionLog:
         """Yield decoded log entries newest-first.
 
         Reads the file backwards in ``_REVERSE_CHUNK_BYTES`` chunks, so
-        peak memory stays a small multiple of one chunk however large the
-        log grows -- the chunk, the carry-joined copy and the decoded list
-        of its lines are all live at once, so budget roughly twice the
-        chunk rather than exactly one.  Blank and torn lines are skipped.
+        peak memory tracks the chunk rather than the log -- the chunk, the
+        carry-joined copy and the decoded list of its lines are all live
+        at once, so budget roughly twice the chunk rather than exactly
+        one.  The chunk is not the whole bound: ``carry`` grows until it
+        meets a newline, so a line longer than a chunk makes the peak
+        track that line instead.  Of the live log's 1 079 787 lines, 5
+        exceed the 64 KB chunk, the largest at 310 898 bytes (measured
+        2026-09-21 on the 379 MB file).  Blank and torn lines are
+        skipped.
         No flock needed: each line is atomically appended, and
         ``_parse_entry`` drops any partial line observed during a
         concurrent write.
@@ -253,10 +258,12 @@ class ExecutionLog:
     def get_execution_history(
         self, job_name: str, limit: int = 10
     ) -> list[ExecutionRecord]:
-        """Return recent executions for a job, newest first.
+        """Return recent executions for a job, newest line first.
 
         Only the latest log line per execution ID is returned (i.e. the
-        completion record takes precedence over the start record).
+        completion record takes precedence over the start record), and
+        position in the file is what "newest" means here, for both the
+        selection and the ordering.
 
         Scans backwards and stops once *limit* distinct IDs are in hand,
         so the cost tracks the limit rather than the job's whole history.
@@ -280,8 +287,13 @@ class ExecutionLog:
                 if len(latest) == limit:
                     break
 
-        ordered = sorted(latest.values(), key=lambda e: e["id"], reverse=True)
-        return [_dict_to_record(e) for e in ordered]
+        # `latest` was filled newest-line-first and dicts keep insertion
+        # order, so its values already carry the promised order.  Sorting
+        # by ID here would select on one key and order on another, and the
+        # two disagree after an ID counter reset -- this log has had one
+        # (155901 -> 1 on 2026-06-09), which floats a pre-reset high-water
+        # ID above a genuinely newer post-reset line.
+        return [_dict_to_record(e) for e in latest.values()]
 
     def fail_running_executions(self) -> int:
         """Mark executions still logged as RUNNING as FAILED.
@@ -293,9 +305,13 @@ class ExecutionLog:
         The whole log is swept.  Streaming is what makes that affordable:
         the old forward parse built a list of every decoded line and cost
         1 689 MB of peak RSS on the live 379 MB file, against 53 MB here,
-        at the one moment the box is least able to absorb it.  Bounding
-        the scan to a window off the tail would save a further 2.7 s of
-        one-time startup latency, and is deliberately not done: `scheduler`
+        at the one moment the box is least able to absorb it.  That 53 MB
+        is mostly the `resolved` set, which holds one int per distinct ID
+        and so grows with the log rather than with the chunk: 383 974 IDs
+        on that same file, about 16 MB of set table before the int objects
+        themselves (measured 2026-09-21).  Bounding the scan to a window
+        off the tail would save a further 2.7 s of one-time startup
+        latency, and is deliberately not done: `scheduler`
         runs this sweep immediately before `lock_store.release_stale_locks`,
         which keeps any lock whose holder still reads RUNNING, so a RUNNING
         row left outside the window pins its `--lock` file permanently and

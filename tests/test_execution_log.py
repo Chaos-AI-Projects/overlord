@@ -3,7 +3,7 @@
 import inspect
 import json
 import threading
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -321,6 +321,58 @@ class TestBoundedLookup:
         assert log.get_execution(rec.id).job_name == "my-job"
 
 
+class TestReverseIteration:
+    """Direct tests for the backwards generator.
+
+    Every other test reaches it through a consumer, and all three
+    consumers dedupe by ID, so a duplicated yield is invisible to them.
+    That hid a real defect for the whole of MS-614: copying the carry
+    instead of consuming it re-emits every row sitting on a chunk
+    boundary, and all 53 tests still passed.
+    """
+
+    def _write_fixed_width_rows(self, log, count):
+        """Append *count* rows of identical byte width; return their IDs and that width."""
+        ids = list(range(1, count + 1))
+        widths = set()
+        with log._log_path.open("a", encoding="utf-8") as fh:
+            for entry_id in ids:
+                line = json.dumps({
+                    "id": entry_id,
+                    "job_name": "fixed-width-job",
+                    "status": "success",
+                    "started_at": "2026-09-21T00:00:00+00:00",
+                    "finished_at": "2026-09-21T00:00:01+00:00",
+                    "exit_code": 0,
+                    "stdout": None,
+                    "stderr": None,
+                }) + "\n"
+                widths.add(len(line.encode("utf-8")))
+                fh.write(line)
+        # Equal widths are what let the caller place a boundary exactly on
+        # a newline; a wider ID would silently move it off.
+        assert len(widths) == 1, f"fixture rows must be equal width, got {widths}"
+        return ids, widths.pop()
+
+    def test_yields_each_entry_exactly_once_on_a_chunk_boundary(self, log, monkeypatch):
+        """A chunk ending exactly at a newline must not re-emit that row.
+
+        Sizing the chunk to a whole number of rows is the alignment that
+        bites: the carry comes back empty, so a handover that copies
+        rather than consumes leaves the boundary row in the list it also
+        hands forward, and the row is yielded twice.  Unaligned chunks
+        never expose it, which is why the parametrised boundary test
+        above stays green against the same mutant.
+        """
+        ids, width = self._write_fixed_width_rows(log, 6)
+        monkeypatch.setattr(execution_log, "_REVERSE_CHUNK_BYTES", width * 2)
+
+        with closing(log._iter_entries_reverse()) as entries:
+            seen = [entry["id"] for entry in entries]
+
+        assert seen == sorted(ids, reverse=True)
+
+
 class TestGetExecutionHistory:
     def test_returns_recent_for_job(self, log):
         for i in range(5):
@@ -361,6 +413,34 @@ class TestGetExecutionHistory:
 
     def test_empty_history(self, log):
         assert log.get_execution_history("no-such-job") == []
+
+    def test_reset_counter_orders_history_by_position_not_by_id(self, log):
+        """Newest first must mean newest line, not highest ID.
+
+        History selects newest-by-position, the same deliberate choice
+        `get_execution` and the sweep make, because the append-only log
+        makes the last line for an ID authoritative.  Selecting and
+        ordering only disagree after an ID counter reset, and the live
+        log has had one (155901 -> 1 on 2026-06-09), which can float a
+        pre-reset high-water ID above a genuinely newer post-reset line.
+        """
+        rows = [
+            {"id": 7, "status": "success"},
+            {"id": 900, "status": "success"},
+            {"id": 7, "status": "running"},
+        ]
+        with log._log_path.open("a", encoding="utf-8") as fh:
+            for row in rows:
+                row.update(job_name="reset-job",
+                           started_at="2026-06-09T00:00:00+00:00",
+                           finished_at=None, exit_code=None,
+                           stdout=None, stderr=None)
+                fh.write(json.dumps(row) + "\n")
+
+        history = log.get_execution_history("reset-job")
+
+        assert [rec.id for rec in history] == [7, 900]
+        assert history[0].status == ExecutionStatus.RUNNING
 
 
 class TestFailRunningExecutions:
