@@ -3,7 +3,15 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    # Pinned to a rev rather than the branch. The sole consumer of this input is
+    # pkgsUnstable.claude-code, and that CLI version is a compatibility
+    # constraint rather than a preference: claude-opus-5-5 needs >= 2.1.280, and
+    # the branch pin left the lock on 2.1.107 from 2026-04-16. This rev is
+    # nixpkgs-unstable head of 2026-09-24 and carries 2.1.280. Editing this spec
+    # at all is what makes the next `nix build` re-lock the input on its own, the
+    # rev form being incidental to that, so to move it again bump the rev and
+    # commit the rewritten flake.lock.
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/34ca302a9572963c02e385c056be37c85ff51b77";
     gws-cli.url = "github:googleworkspace/cli/v0.22.5";
   };
 
