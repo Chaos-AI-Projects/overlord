@@ -102,7 +102,17 @@ PYEOF
       pkgs.tini             # lightweight init for PID 1 zombie reaping
       pkgs.poppler-utils    # pdftotext, pdftoppm, pdfinfo
       pkgs.chez             # Chez Scheme
+      pkgs.chromium         # headless browser for doc-review's deck fit check (DR-13)
     ];
+
+    # The image has no /etc/fonts, so without this fontconfig finds no fonts
+    # and Chromium renders any fallback text as tofu, which measures wrong.
+    # The conf.d include brings fontconfig's generic-family and metric-alias
+    # rules, so sans-serif and monospace resolve to a definite face.
+    fontsConf = pkgs.makeFontsConf {
+      fontDirectories = [ pkgs.dejavu_fonts pkgs.liberation_ttf ];
+      includes = [ "${pkgs.fontconfig.out}/etc/fonts/conf.d" ];
+    };
 
     binPath = lib.makeBinPath runtimePackages;
 
@@ -181,6 +191,7 @@ NSS
           "NIX_SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
           "TZDIR=${pkgs.tzdata}/share/zoneinfo"
           "CONTAINER_HOST=unix:///run/podman/podman.sock"
+          "FONTCONFIG_FILE=${fontsConf}"
         ];
         WorkingDir = "/home/overlord";
       };
