@@ -18,12 +18,7 @@
   outputs = { self, nixpkgs, nixpkgs-unstable, gws-cli }:
   let
     system = "x86_64-linux";
-    pkgs = import nixpkgs {
-      inherit system;
-      config.permittedInsecurePackages = [
-        "olm-3.2.16"
-      ];
-    };
+    pkgs = import nixpkgs { inherit system; };
     pkgsUnstable = import nixpkgs-unstable {
       inherit system;
       config.allowUnfree = true;
@@ -95,7 +90,6 @@ PYEOF
       pkgs.tmux             # terminal multiplexer
       pkgs.iproute2         # ss, ip (network diagnostics)
       pkgs.lsof             # file diagnostics
-      pkgs.matrix-commander # Matrix protocol CLI client
       pkgs.signal-cli       # Signal protocol CLI client (bundles its own JRE)
       pkgs.podman           # Podman CLI (talks to host socket)
       pkgs.tzdata           # IANA timezone database
