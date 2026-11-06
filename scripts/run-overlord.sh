@@ -32,9 +32,13 @@ save_state() {
 run_container() {
     local image="$1"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting container with image: $image"
+    # --dns-option replaces the host's resolv.conf options line, so edns0 is
+    # restated. single-request-reopen stops 5s stalls on parallel A/AAAA (MS-688).
     podman run --rm \
         --name "$CONTAINER_NAME" \
         --network=host \
+        --dns-option edns0 \
+        --dns-option single-request-reopen \
         --userns=keep-id:uid=1000,gid=1000 \
         -e TZ="$TZ" \
         -e CONTAINER_HOST=unix:///run/podman/podman.sock \
